@@ -581,17 +581,20 @@ impl State {
                             if let Some(action) =
                                 raw.and_then(|raw| hardcoded_expose_action(raw, modifiers))
                             {
-                                match action {
-                                    ExposeKeyAction::Close => this.niri.layout.close_expose(),
-                                    ExposeKeyAction::Confirm => this.niri.layout.confirm_expose(),
-                                    ExposeKeyAction::Cycle(forward) => {
-                                        this.niri.layout.cycle_expose(forward)
-                                    }
-                                    ExposeKeyAction::Focus(direction) => {
-                                        this.niri.layout.focus_expose(direction)
-                                    }
+                                this.handle_expose_key_action(action);
+                                if matches!(action, ExposeKeyAction::Focus(_)) {
+                                    this.start_key_repeat_with(move |state| {
+                                        // Do not keep navigating after Exposé closes or a
+                                        // launcher takes keyboard focus.
+                                        if !state.niri.layout.is_expose_open()
+                                            || !state.niri.keyboard_focus.is_expose()
+                                        {
+                                            return false;
+                                        }
+                                        state.handle_expose_key_action(action);
+                                        true
+                                    });
                                 }
-                                this.niri.queue_redraw_all();
                             }
                             this.niri.suppressed_keys.insert(key_code);
                         }
@@ -630,7 +633,24 @@ impl State {
         if !bind.repeat {
             return;
         }
+        self.start_key_repeat_with(move |state| {
+            state.handle_bind(bind.clone());
+            true
+        });
+    }
 
+    fn handle_expose_key_action(&mut self, action: ExposeKeyAction) {
+        match action {
+            ExposeKeyAction::Close => self.niri.layout.close_expose(),
+            ExposeKeyAction::Confirm => self.niri.layout.confirm_expose(),
+            ExposeKeyAction::Cycle(forward) => self.niri.layout.cycle_expose(forward),
+            ExposeKeyAction::Focus(direction) => self.niri.layout.focus_expose(direction),
+        }
+        self.niri.queue_redraw_all();
+    }
+
+    /// Start repeating a key action, stopping when the callback returns false.
+    fn start_key_repeat_with(&mut self, mut repeat: impl FnMut(&mut State) -> bool + 'static) {
         // Stop the previous key repeat if any.
         if let Some(token) = self.niri.bind_repeat_timer.take() {
             self.niri.event_loop.remove(token);
@@ -652,8 +672,12 @@ impl State {
             .niri
             .event_loop
             .insert_source(repeat_timer, move |_, _, state| {
-                state.handle_bind(bind.clone());
-                TimeoutAction::ToDuration(repeat_duration)
+                if repeat(state) {
+                    TimeoutAction::ToDuration(repeat_duration)
+                } else {
+                    state.niri.bind_repeat_timer = None;
+                    TimeoutAction::Drop
+                }
             })
             .unwrap();
 
@@ -5413,9 +5437,51 @@ fn make_binds_iter<'a>(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::Instant;
 
     use super::*;
     use crate::animation::Clock;
+    use crate::tests::Fixture;
+
+    #[test]
+    fn key_repeat_reschedules_and_stops_when_requested() {
+        let mut config = Config::default();
+        config.input.keyboard.repeat_delay = 0;
+        config.input.keyboard.repeat_rate = 255;
+        let mut fixture = Fixture::with_config(config);
+        let calls = Rc::new(Cell::new(0));
+        let repeated_calls = calls.clone();
+        fixture.niri_state().start_key_repeat_with(move |_| {
+            let count = repeated_calls.get() + 1;
+            repeated_calls.set(count);
+            count < 2
+        });
+
+        assert!(fixture.niri().bind_repeat_timer.is_some());
+        fixture.state.server.dispatch();
+        assert_eq!(calls.get(), 1);
+        assert!(fixture.niri().bind_repeat_timer.is_some());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while calls.get() < 2 && Instant::now() < deadline {
+            fixture.state.server.dispatch();
+        }
+        assert_eq!(calls.get(), 2);
+        assert!(fixture.niri().bind_repeat_timer.is_none());
+    }
+
+    #[test]
+    fn zero_repeat_rate_disables_key_repeat() {
+        let mut config = Config::default();
+        config.input.keyboard.repeat_rate = 0;
+        let mut fixture = Fixture::with_config(config);
+        fixture.niri_state().start_key_repeat_with(|_| {
+            panic!("key repeat must be disabled");
+        });
+        assert!(fixture.niri().bind_repeat_timer.is_none());
+        fixture.state.server.dispatch();
+    }
 
     #[test]
     fn expose_fallback_keys_do_not_consume_modified_shortcuts() {

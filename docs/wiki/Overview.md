@@ -54,6 +54,7 @@ The default configuration binds `Mod+E` to `toggle-expose`.
 Click or tap a window to close Exposé and focus it, switching to its workspace when necessary.
 Left and Right select windows within the current row on the active output.
 Up and Down select the window closest horizontally in the adjacent row.
+Holding an arrow key repeats navigation using the keyboard's `repeat-delay` and `repeat-rate`.
 Tab cycles through all windows; Shift+Tab cycles backwards.
 Selection updates the actual layout focus, so actions such as `close-window` affect the selected window.
 Enter confirms the selection, while Escape or a right click closes Exposé, keeping the current focus.
