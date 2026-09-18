@@ -52,8 +52,15 @@ Positions are calculated before the animation starts, so visible windows move di
 Use `toggle-expose`, `open-expose`, or `close-expose` in binds or through `niri msg action`.
 The default configuration binds `Mod+E` to `toggle-expose`.
 Click or tap a window to close Exposé and focus it, switching to its workspace when necessary.
-Tab and the arrow keys cycle through windows on the active output; Shift+Tab cycles backwards.
-Enter confirms the selection, while Escape or a right click closes Exposé without changing focus.
+Left and Right select windows within the current row on the active output.
+Up and Down select the window closest horizontally in the adjacent row.
+Tab cycles through all windows; Shift+Tab cycles backwards.
+Selection updates the actual layout focus, so actions such as `close-window` affect the selected window.
+Enter confirms the selection, while Escape or a right click closes Exposé, keeping the current focus.
+Configured keyboard and mouse bindings take precedence over these built-in controls.
+Thumbnails retain the configured border, including for fullscreen and maximized windows:
+the selected window uses its active appearance, and other windows use its inactive appearance.
+The configured focus ring is shown only on the selected window, just like in the normal layout.
 
 Configure its transition independently with `animations { expose-open-close { ... } }`.
 Opening Exposé leaves the Overview, and opening the Overview leaves Exposé.

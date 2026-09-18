@@ -2,6 +2,63 @@
 
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExposeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Navigate the planned rows, not the intermediate positions during animation.
+pub(super) fn neighbor(
+    rects: &[Rectangle<f64, Logical>],
+    selected: usize,
+    direction: ExposeDirection,
+) -> Option<usize> {
+    let current = rects.get(selected)?;
+    match direction {
+        ExposeDirection::Left => selected
+            .checked_sub(1)
+            .filter(|&idx| rects[idx].loc.y == current.loc.y),
+        ExposeDirection::Right => {
+            let idx = selected + 1;
+            rects
+                .get(idx)
+                .filter(|rect| rect.loc.y == current.loc.y)
+                .map(|_| idx)
+        }
+        ExposeDirection::Up | ExposeDirection::Down => {
+            let row_y = if direction == ExposeDirection::Up {
+                rects[..selected]
+                    .iter()
+                    .rev()
+                    .find(|rect| rect.loc.y < current.loc.y)?
+                    .loc
+                    .y
+            } else {
+                rects[selected + 1..]
+                    .iter()
+                    .find(|rect| rect.loc.y > current.loc.y)?
+                    .loc
+                    .y
+            };
+            let center_x = current.loc.x + current.size.w / 2.;
+            rects
+                .iter()
+                .enumerate()
+                .filter(|(_, rect)| rect.loc.y == row_y)
+                .min_by(|(_, a), (_, b)| {
+                    let distance = |rect: &Rectangle<f64, Logical>| {
+                        (rect.loc.x + rect.size.w / 2. - center_x).abs()
+                    };
+                    distance(a).total_cmp(&distance(b))
+                })
+                .map(|(idx, _)| idx)
+        }
+    }
+}
+
 /// Pack windows in opening order, preserving their aspect ratios. Find the largest
 /// common scale that fits, wrapping to the next row when necessary and centering
 /// each row horizontally.
@@ -74,6 +131,32 @@ pub(super) fn arrange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_stays_in_rows_and_uses_nearest_center_in_adjacent_row() {
+        use ExposeDirection::*;
+        let rects = [
+            Rectangle::new((0., 0.).into(), (80., 60.).into()),
+            Rectangle::new((100., 0.).into(), (80., 40.).into()),
+            Rectangle::new((200., 0.).into(), (80., 60.).into()),
+            Rectangle::new((50., 100.).into(), (80., 60.).into()),
+            Rectangle::new((150., 100.).into(), (80., 60.).into()),
+            Rectangle::new((100., 200.).into(), (80., 60.).into()),
+        ];
+        assert_eq!(neighbor(&rects, 1, Left), Some(0));
+        assert_eq!(neighbor(&rects, 1, Right), Some(2));
+        assert_eq!(neighbor(&rects, 0, Left), None);
+        assert_eq!(neighbor(&rects, 2, Right), None);
+        assert_eq!(neighbor(&rects, 3, Left), None);
+        assert_eq!(neighbor(&rects, 4, Right), None);
+        assert_eq!(neighbor(&rects, 0, Down), Some(3));
+        assert_eq!(neighbor(&rects, 2, Down), Some(4));
+        assert_eq!(neighbor(&rects, 4, Up), Some(1));
+        assert_eq!(neighbor(&rects, 4, Down), Some(5));
+        assert_eq!(neighbor(&rects, 0, Up), None);
+        assert_eq!(neighbor(&rects, 5, Down), None);
+        assert_eq!(neighbor(&[], 0, Down), None);
+    }
 
     #[test]
     fn windows_fit_without_overlap_and_keep_their_shape() {

@@ -77,6 +77,7 @@ use crate::window::ResolvedWindowRules;
 
 pub mod closing_window;
 mod expose;
+pub use expose::ExposeDirection;
 pub mod floating;
 pub mod focus_ring;
 pub mod insert_hint_element;
@@ -4659,9 +4660,30 @@ impl<W: LayoutElement> Layout<W> {
         if let Some(mon) = self.active_monitor() {
             mon.cycle_expose(forward);
         }
+        self.focus_expose_selection();
+    }
+
+    pub fn focus_expose(&mut self, direction: ExposeDirection) {
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_expose(direction);
+        }
+        self.focus_expose_selection();
+    }
+
+    fn focus_expose_selection(&mut self) {
+        let window = self
+            .active_monitor_ref()
+            .and_then(|mon| mon.selected_expose_window())
+            .cloned();
+        if let Some(window) = window {
+            self.activate_window(&window);
+        }
     }
 
     pub fn confirm_expose(&mut self) {
+        if let Some(mon) = self.active_monitor() {
+            mon.sync_expose_selection();
+        }
         let window = self
             .active_monitor_ref()
             .and_then(|mon| mon.selected_expose_window())

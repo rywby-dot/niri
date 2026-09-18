@@ -477,6 +477,23 @@ impl<W: LayoutElement> Tile<W> {
     }
 
     pub fn update_render_elements(&mut self, is_active: bool, view_rect: Rectangle<f64, Logical>) {
+        self.update_render_elements_inner(is_active, view_rect, false);
+    }
+
+    pub fn update_expose_render_elements(
+        &mut self,
+        is_active: bool,
+        view_rect: Rectangle<f64, Logical>,
+    ) {
+        self.update_render_elements_inner(is_active, view_rect, true);
+    }
+
+    fn update_render_elements_inner(
+        &mut self,
+        is_active: bool,
+        view_rect: Rectangle<f64, Logical>,
+        expose: bool,
+    ) {
         let rules = self.window.rules();
         let animated_tile_size = self.animated_tile_size();
         let expanded_progress = self.expanded_progress();
@@ -521,7 +538,11 @@ impl<W: LayoutElement> Tile<W> {
             ),
             radius,
             self.scale,
-            1. - expanded_progress as f32,
+            if expose {
+                1.
+            } else {
+                1. - expanded_progress as f32
+            },
         );
 
         let radius = if self.visual_border_width().is_some() {
@@ -544,16 +565,30 @@ impl<W: LayoutElement> Tile<W> {
         } else {
             false
         };
-        let radius = radius.expanded_by(self.focus_ring.width() as f32);
+        // Expanded tiles have no space reserved for a border. In Exposé draw
+        // it outside the contents, and place the focus ring outside that border.
+        let outer_border_width = if expose {
+            self.expose_outer_border_width()
+        } else {
+            0.
+        };
+        let radius = radius.expanded_by((outer_border_width + self.focus_ring.width()) as f32);
         self.focus_ring.update_render_elements(
-            animated_tile_size,
+            animated_tile_size + Size::from((outer_border_width, outer_border_width)).upscale(2.),
             is_active,
             !draw_focus_ring_with_background,
             self.window.is_urgent(),
-            view_rect,
+            Rectangle::new(
+                view_rect.loc + Point::from((outer_border_width, outer_border_width)),
+                view_rect.size,
+            ),
             radius,
             self.scale,
-            1. - expanded_progress as f32,
+            if expose {
+                1.
+            } else {
+                1. - expanded_progress as f32
+            },
         );
 
         self.fullscreen_backdrop.resize(animated_tile_size);
@@ -778,6 +813,14 @@ impl<W: LayoutElement> Tile<W> {
         // handle things like computing intermediate tile size when an animated resize starts during
         // an animated unfullscreen resize.
         Some(self.border.width())
+    }
+
+    fn expose_outer_border_width(&self) -> f64 {
+        if self.visual_border_width().is_none() && !self.border.is_off() {
+            self.border.width()
+        } else {
+            0.
+        }
     }
 
     /// Returns the location of the window's visual geometry within this Tile.
@@ -1071,6 +1114,7 @@ impl<W: LayoutElement> Tile<W> {
         location: Point<f64, Logical>,
         mut xray_pos: XrayPos,
         focus_ring: bool,
+        expose: bool,
         push: &mut dyn FnMut(TileRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Tile::render_inner");
@@ -1329,15 +1373,26 @@ impl<W: LayoutElement> Tile<W> {
                 location + Point::from((width, width)),
                 &mut |elem| push(elem.into()),
             );
+        } else if expose {
+            self.border
+                .render(ctx.renderer, location, &mut |elem| push(elem.into()));
         }
 
         // Hide the focus ring when maximized/fullscreened. It's not normally visible anyway due to
         // being outside the monitor or obscured by a solid colored bar, but it is visible under
         // semitransparent bars in maximized state (which is a bit weird) and in the overview (also
         // a bit weird).
-        if focus_ring && expanded_progress < 1. {
-            self.focus_ring
-                .render(ctx.renderer, location, &mut |elem| push(elem.into()));
+        if focus_ring && (expose || expanded_progress < 1.) {
+            let outer_border_width = if expose {
+                self.expose_outer_border_width()
+            } else {
+                0.
+            };
+            self.focus_ring.render(
+                ctx.renderer,
+                location - Point::from((outer_border_width, outer_border_width)),
+                &mut |elem| push(elem.into()),
+            );
         }
 
         if expanded_progress < 1. {
@@ -1358,12 +1413,36 @@ impl<W: LayoutElement> Tile<W> {
         );
     }
 
+    /// Exposé preserves decorations, including on fullscreen and maximized tiles.
+    pub fn render_expose<R: NiriRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        location: Point<f64, Logical>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(TileRenderElement<R>),
+    ) {
+        self.render_with_expose(ctx, location, xray_pos, focus_ring, true, push);
+    }
+
     pub fn render<R: NiriRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        location: Point<f64, Logical>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(TileRenderElement<R>),
+    ) {
+        self.render_with_expose(ctx, location, xray_pos, focus_ring, false, push);
+    }
+
+    fn render_with_expose<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
         xray_pos: XrayPos,
         focus_ring: bool,
+        expose: bool,
         push: &mut dyn FnMut(TileRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Tile::render");
@@ -1386,6 +1465,7 @@ impl<W: LayoutElement> Tile<W> {
                 Point::new(0., 0.),
                 xray_pos,
                 focus_ring,
+                expose,
                 &mut |elem| elements.push(elem),
             );
             match open.render(
@@ -1413,6 +1493,7 @@ impl<W: LayoutElement> Tile<W> {
                 Point::new(0., 0.),
                 xray_pos,
                 focus_ring,
+                expose,
                 &mut |elem| elements.push(elem),
             );
             match alpha.offscreen.render(ctx.renderer, scale, &elements) {
@@ -1431,7 +1512,9 @@ impl<W: LayoutElement> Tile<W> {
         }
 
         if !pushed {
-            self.render_inner(ctx, location, xray_pos, focus_ring, &mut |elem| push(elem));
+            self.render_inner(ctx, location, xray_pos, focus_ring, expose, &mut |elem| {
+                push(elem)
+            });
         }
     }
 

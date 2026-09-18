@@ -717,6 +717,10 @@ impl KeyboardFocus {
     pub fn is_overview(&self) -> bool {
         matches!(self, KeyboardFocus::Overview)
     }
+
+    pub fn is_expose(&self) -> bool {
+        matches!(self, KeyboardFocus::Expose)
+    }
 }
 
 pub struct State {
@@ -3563,7 +3567,10 @@ impl Niri {
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
         if self.layout.is_expose_open() {
-            under = under.or_else(window_under);
+            under = under
+                .or_else(|| layer_popup_under(Layer::Top))
+                .or_else(|| layer_toplevel_under(Layer::Top))
+                .or_else(window_under);
         } else if mon.render_above_top_layer() {
             under = under
                 .or_else(interactive_moved_window_under)

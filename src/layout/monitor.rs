@@ -1073,12 +1073,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub(super) fn open_expose(&mut self) {
         let zoom = self.overview_zoom();
-        let selected_id = self
-            .expose
-            .as_ref()
-            .and_then(|expose| expose.windows.get(expose.selected))
-            .map(|window| window.id.clone())
-            .or_else(|| self.active_window().map(|win| win.id().clone()));
+        let selected_id = self.active_window().map(|win| win.id().clone());
         let mut windows: Vec<_> = self
             .workspaces_with_render_geo_cull(false)
             .flat_map(|(ws, geo)| {
@@ -1168,7 +1163,23 @@ impl<W: LayoutElement> Monitor<W> {
         expose.windows.get(expose.selected).map(|window| &window.id)
     }
 
+    pub(super) fn sync_expose_selection(&mut self) {
+        let active = self.active_window().map(|window| window.id().clone());
+        if let Some(expose) = &mut self.expose {
+            if expose.open {
+                if let Some(selected) = expose
+                    .windows
+                    .iter()
+                    .position(|window| Some(&window.id) == active.as_ref())
+                {
+                    expose.selected = selected;
+                }
+            }
+        }
+    }
+
     pub(super) fn cycle_expose(&mut self, forward: bool) {
+        self.sync_expose_selection();
         let Some(expose) = self.expose.as_mut().filter(|expose| expose.open) else {
             return;
         };
@@ -1181,6 +1192,17 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             (expose.selected + count - 1) % count
         };
+    }
+
+    pub(super) fn focus_expose(&mut self, direction: super::ExposeDirection) {
+        self.sync_expose_selection();
+        let Some(expose) = self.expose.as_mut().filter(|expose| expose.open) else {
+            return;
+        };
+        let targets: Vec<_> = expose.windows.iter().map(|window| window.target).collect();
+        if let Some(selected) = super::expose::neighbor(&targets, expose.selected, direction) {
+            expose.selected = selected;
+        }
     }
 
     /// Update destinations after choosing a window on a different workspace.
@@ -1293,12 +1315,15 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
         if self.expose.is_some() {
+            // Configured focus actions, new windows and closing windows must update
+            // the selection as well as the real layout focus.
+            self.sync_expose_selection();
             let selected = self.selected_expose_window().cloned();
             for ws in &mut self.workspaces {
                 let view_size = self.view_size;
                 for (tile, pos) in ws.tiles_with_render_positions_mut(false) {
-                    tile.update_render_elements(
-                        selected.as_ref() == Some(tile.window().id()),
+                    tile.update_expose_render_elements(
+                        is_active && selected.as_ref() == Some(tile.window().id()),
                         Rectangle::new(pos.upscale(-1.), view_size),
                     );
                 }
@@ -1880,7 +1905,8 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn render_above_top_layer(&self) -> bool {
         if self.expose.is_some() {
-            return true;
+            // Like overview, leave bars and launchers above the window grid.
+            return false;
         }
         // Render above the top layer only if the view is stationary.
         if self.workspace_switch.is_some() || self.overview_progress.is_some() {
@@ -1938,11 +1964,11 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let geo = window.geometry(progress);
                 let zoom = geo.size.w / tile.tile_size().w.max(1.);
-                tile.render(
+                tile.render_expose(
                     ctx.r(),
                     Point::default(),
                     XrayPos::new(geo.loc, zoom),
-                    expose.open && idx == expose.selected,
+                    focus_ring && expose.open && idx == expose.selected,
                     &mut |elem| {
                         let elem = MonitorInnerRenderElement::Expose(elem);
                         let elem = RescaleRenderElement::from_element(elem, Point::default(), zoom);

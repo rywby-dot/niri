@@ -140,22 +140,49 @@ fn visible_windows_move_directly_to_their_planned_positions() {
 }
 
 #[test]
-fn cancel_and_keyboard_selection_do_not_change_focus() {
+fn keyboard_selection_updates_focus_and_cancel_preserves_it() {
     let mut layout = setup();
     let focus = *layout.focus().unwrap().id();
     layout.open_expose();
     layout.cycle_expose(true);
-    assert_eq!(*layout.focus().unwrap().id(), focus);
+    let selected = *layout.focus().unwrap().id();
+    assert_ne!(selected, focus);
     Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
     layout.close_expose();
-    assert_eq!(*layout.focus().unwrap().id(), focus);
+    assert_eq!(*layout.focus().unwrap().id(), selected);
     // Catch the closing transition and reverse it.
     layout.open_expose();
     assert!(layout.is_expose_open());
     Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
     layout.confirm_expose();
-    assert_ne!(*layout.focus().unwrap().id(), focus);
+    assert_eq!(*layout.focus().unwrap().id(), selected);
     Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    layout.verify_invariants();
+}
+
+#[test]
+fn configured_focus_actions_are_respected_before_rendering() {
+    let mut layout = setup();
+    layout.open_expose();
+    layout.activate_window(&1);
+    layout.confirm_expose();
+    assert_eq!(*layout.focus().unwrap().id(), 1);
+    assert!(!layout.is_expose_open());
+    layout.verify_invariants();
+}
+
+#[test]
+fn arrow_selection_changes_real_focus_without_leaving_expose() {
+    let mut layout = setup();
+    layout.open_expose();
+    layout.activate_window(&1);
+    layout.focus_expose(ExposeDirection::Right);
+    assert_eq!(*layout.focus().unwrap().id(), 2);
+    assert!(layout.is_expose_open());
+    layout.focus_expose(ExposeDirection::Right);
+    assert_eq!(*layout.focus().unwrap().id(), 2);
+    layout.focus_expose(ExposeDirection::Left);
+    assert_eq!(*layout.focus().unwrap().id(), 1);
     layout.verify_invariants();
 }
 

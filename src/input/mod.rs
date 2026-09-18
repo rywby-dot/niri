@@ -48,7 +48,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
-use crate::layout::{ActivateWindow, LayoutElement as _};
+use crate::layout::{ActivateWindow, ExposeDirection, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -537,42 +537,6 @@ impl State {
                     }
                 }
 
-                if this.niri.layout.is_expose_open()
-                    && !this.niri.is_locked()
-                    && !this.niri.screenshot_ui.is_open()
-                    && !this.niri.window_mru_ui.is_open()
-                    && pressed
-                    && matches!(
-                        raw,
-                        Some(
-                            Keysym::Escape
-                                | Keysym::Return
-                                | Keysym::Tab
-                                | Keysym::ISO_Left_Tab
-                                | Keysym::Left
-                                | Keysym::Right
-                                | Keysym::Up
-                                | Keysym::Down
-                        )
-                    )
-                {
-                    match raw {
-                        Some(Keysym::Escape) => this.niri.layout.close_expose(),
-                        Some(Keysym::Return) => this.niri.layout.confirm_expose(),
-                        Some(Keysym::ISO_Left_Tab | Keysym::Left | Keysym::Up) => {
-                            this.niri.layout.cycle_expose(false)
-                        }
-                        Some(Keysym::Tab) => this
-                            .niri
-                            .layout
-                            .cycle_expose(!modifiers.contains(Modifiers::SHIFT)),
-                        _ => this.niri.layout.cycle_expose(true),
-                    }
-                    this.niri.queue_redraw_all();
-                    this.niri.suppressed_keys.insert(key_code);
-                    return FilterResult::Intercept(None);
-                }
-
                 if pressed && raw == Some(Keysym::Escape) {
                     // Cancel certain grabs on Escape.
                     let pointer = this.niri.seat.get_pointer().unwrap();
@@ -611,12 +575,24 @@ impl State {
                 };
 
                 if matches!(res, FilterResult::Forward) {
-                    if this.niri.layout.is_expose_open()
-                        && !this.niri.is_locked()
-                        && !this.niri.screenshot_ui.is_open()
-                        && !this.niri.window_mru_ui.is_open()
-                    {
+                    if this.niri.keyboard_focus.is_expose() {
                         if pressed {
+                            // Configured bindings take precedence, just like in overview.
+                            if let Some(action) =
+                                raw.and_then(|raw| hardcoded_expose_action(raw, modifiers))
+                            {
+                                match action {
+                                    ExposeKeyAction::Close => this.niri.layout.close_expose(),
+                                    ExposeKeyAction::Confirm => this.niri.layout.confirm_expose(),
+                                    ExposeKeyAction::Cycle(forward) => {
+                                        this.niri.layout.cycle_expose(forward)
+                                    }
+                                    ExposeKeyAction::Focus(direction) => {
+                                        this.niri.layout.focus_expose(direction)
+                                    }
+                                }
+                                this.niri.queue_redraw_all();
+                            }
                             this.niri.suppressed_keys.insert(key_code);
                         }
                         return FilterResult::Intercept(None);
@@ -2844,25 +2820,6 @@ impl State {
 
         let button_state = event.state();
 
-        if self.niri.layout.is_expose_open()
-            && !self.niri.is_locked()
-            && !self.niri.screenshot_ui.is_open()
-            && !self.niri.window_mru_ui.is_open()
-            && button_state == ButtonState::Pressed
-        {
-            if button == Some(MouseButton::Left) {
-                if let Some(mapped) = self.niri.window_under_cursor() {
-                    let window = mapped.window.clone();
-                    self.niri.layout.select_expose_window(&window);
-                }
-            } else if button == Some(MouseButton::Right) {
-                self.niri.layout.close_expose();
-            }
-            self.niri.suppressed_buttons.insert(button_code);
-            self.niri.queue_redraw_all();
-            return;
-        }
-
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
         // Ignore release events for mouse clicks that triggered a bind.
@@ -2924,6 +2881,29 @@ impl State {
             // We received an event for the regular pointer, so show it now.
             self.niri.pointer_visibility = PointerVisibility::Visible;
             self.niri.tablet_cursor_location = None;
+
+            if self.niri.layout.is_expose_open()
+                && !self.niri.is_locked()
+                && !self.niri.screenshot_ui.is_open()
+                && !self.niri.window_mru_ui.is_open()
+                && self
+                    .niri
+                    .contents_under(pointer.current_location())
+                    .layer
+                    .is_none()
+            {
+                if button == Some(MouseButton::Left) {
+                    if let Some(mapped) = self.niri.window_under_cursor() {
+                        let window = mapped.window.clone();
+                        self.niri.layout.select_expose_window(&window);
+                    }
+                } else if button == Some(MouseButton::Right) {
+                    self.niri.layout.close_expose();
+                }
+                self.niri.suppressed_buttons.insert(button_code);
+                self.niri.queue_redraw_all();
+                return;
+            }
 
             let is_overview_open = self.niri.layout.is_overview_open();
 
@@ -3802,7 +3782,7 @@ impl State {
                             }
                         }
                     } else if !tool.is_grabbed() {
-                        if self.niri.layout.is_expose_open() {
+                        if self.niri.layout.is_expose_open() && under.layer.is_none() {
                             if let Some(mapped) = self.niri.window_under(pos) {
                                 let window = mapped.window.clone();
                                 self.niri.layout.select_expose_window(&window);
@@ -4427,7 +4407,7 @@ impl State {
                 }
             }
         } else if !handle.is_grabbed() {
-            if self.niri.layout.is_expose_open() {
+            if self.niri.layout.is_expose_open() && under.layer.is_none() {
                 if let Some(mapped) = self.niri.window_under(pos) {
                     let window = mapped.window.clone();
                     self.niri.layout.select_expose_window(&window);
@@ -4958,6 +4938,34 @@ fn allowed_during_screenshot(action: &Action) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExposeKeyAction {
+    Close,
+    Confirm,
+    Cycle(bool),
+    Focus(ExposeDirection),
+}
+
+fn hardcoded_expose_action(raw: Keysym, mods: Modifiers) -> Option<ExposeKeyAction> {
+    if mods == Modifiers::SHIFT && matches!(raw, Keysym::Tab | Keysym::ISO_Left_Tab) {
+        return Some(ExposeKeyAction::Cycle(false));
+    }
+    if !mods.is_empty() {
+        return None;
+    }
+    Some(match raw {
+        Keysym::Escape => ExposeKeyAction::Close,
+        Keysym::Return => ExposeKeyAction::Confirm,
+        Keysym::Tab => ExposeKeyAction::Cycle(true),
+        Keysym::ISO_Left_Tab => ExposeKeyAction::Cycle(false),
+        Keysym::Left => ExposeKeyAction::Focus(ExposeDirection::Left),
+        Keysym::Right => ExposeKeyAction::Focus(ExposeDirection::Right),
+        Keysym::Up => ExposeKeyAction::Focus(ExposeDirection::Up),
+        Keysym::Down => ExposeKeyAction::Focus(ExposeDirection::Down),
+        _ => return None,
+    })
+}
+
 fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
     let mods = modifiers_from_state(mods);
     if !mods.is_empty() {
@@ -5408,6 +5416,79 @@ mod tests {
 
     use super::*;
     use crate::animation::Clock;
+
+    #[test]
+    fn expose_fallback_keys_do_not_consume_modified_shortcuts() {
+        assert_eq!(
+            hardcoded_expose_action(Keysym::Return, Modifiers::empty()),
+            Some(ExposeKeyAction::Confirm)
+        );
+        for modifier in [
+            Modifiers::COMPOSITOR,
+            Modifiers::SUPER,
+            Modifiers::CTRL,
+            Modifiers::ALT,
+            Modifiers::SHIFT,
+        ] {
+            assert_eq!(hardcoded_expose_action(Keysym::Return, modifier), None);
+            assert_eq!(hardcoded_expose_action(Keysym::Down, modifier), None);
+        }
+        assert_eq!(
+            hardcoded_expose_action(Keysym::Tab, Modifiers::SHIFT),
+            Some(ExposeKeyAction::Cycle(false))
+        );
+        assert_eq!(
+            hardcoded_expose_action(Keysym::Up, Modifiers::empty()),
+            Some(ExposeKeyAction::Focus(ExposeDirection::Up))
+        );
+    }
+
+    #[test]
+    fn configured_enter_bindings_are_intercepted_before_expose_fallback() {
+        for logo in [false, true] {
+            let bindings = Binds(vec![Bind {
+                key: Key {
+                    trigger: Trigger::Keysym(Keysym::Return),
+                    modifiers: if logo {
+                        Modifiers::COMPOSITOR
+                    } else {
+                        Modifiers::empty()
+                    },
+                },
+                action: Action::Spawn(vec!["terminal".to_owned()]),
+                repeat: false,
+                cooldown: None,
+                allow_when_locked: false,
+                allow_inhibiting: false,
+                hotkey_overlay_title: None,
+            }]);
+            let mut suppressed = HashSet::new();
+            let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
+            let result = should_intercept_key(
+                &mut suppressed,
+                &bindings.0,
+                ModKey::Super,
+                Keycode::from(36u32),
+                Keysym::Return,
+                Some(Keysym::Return),
+                true,
+                ModifiersState {
+                    logo,
+                    ..Default::default()
+                },
+                &screenshot_ui,
+                false,
+                false,
+            );
+            assert!(matches!(
+                result,
+                FilterResult::Intercept(Some(Bind {
+                    action: Action::Spawn(_),
+                    ..
+                }))
+            ));
+        }
+    }
 
     #[test]
     fn bindings_suppress_keys() {
