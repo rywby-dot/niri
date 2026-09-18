@@ -41,6 +41,23 @@ https://github.com/user-attachments/assets/b76d5349-aa20-4889-ab90-0a51554c789d
 
 </video>
 
+### Exposé
+
+Exposé shows every window from every workspace in a grid on its output.
+Windows appear in opening order, from left to right and then on successive rows.
+Each row is centered horizontally.
+Their contents and aspect ratios are preserved; their scale adapts to the available space.
+Positions are calculated before the animation starts, so visible windows move directly into the grid.
+
+Use `toggle-expose`, `open-expose`, or `close-expose` in binds or through `niri msg action`.
+The default configuration binds `Mod+E` to `toggle-expose`.
+Click or tap a window to close Exposé and focus it, switching to its workspace when necessary.
+Tab and the arrow keys cycle through windows on the active output; Shift+Tab cycles backwards.
+Enter confirms the selection, while Escape or a right click closes Exposé without changing focus.
+
+Configure its transition independently with `animations { expose-open-close { ... } }`.
+Opening Exposé leaves the Overview, and opening the Overview leaves Exposé.
+
 ### Configuration
 
 See the full documentation for the `overview {}` section [here](./Configuration:-Miscellaneous.md#overview).

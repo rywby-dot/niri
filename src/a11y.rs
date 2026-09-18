@@ -20,6 +20,7 @@ const ID_SCREENSHOT_UI: NodeId = NodeId(2);
 const ID_EXIT_CONFIRM_DIALOG: NodeId = NodeId(3);
 const ID_OVERVIEW: NodeId = NodeId(4);
 const ID_MRU: NodeId = NodeId(5);
+const ID_EXPOSE: NodeId = NodeId(6);
 
 pub struct A11y {
     event_loop: LoopHandle<'static, State>,
@@ -275,6 +276,7 @@ impl Niri {
             KeyboardFocus::ScreenshotUi => ID_SCREENSHOT_UI,
             KeyboardFocus::ExitConfirmDialog => ID_EXIT_CONFIRM_DIALOG,
             KeyboardFocus::Overview => ID_OVERVIEW,
+            KeyboardFocus::Expose => ID_EXPOSE,
             KeyboardFocus::Mru => ID_MRU,
             _ => ID_ROOT,
         }
@@ -308,6 +310,9 @@ impl Niri {
         let mut overview = Node::new(Role::Group);
         overview.set_label("Overview");
 
+        let mut expose = Node::new(Role::Group);
+        expose.set_label("Exposé");
+
         let mut mru = Node::new(Role::Group);
         mru.set_label("Recent windows");
 
@@ -317,6 +322,7 @@ impl Niri {
             ID_SCREENSHOT_UI,
             ID_EXIT_CONFIRM_DIALOG,
             ID_OVERVIEW,
+            ID_EXPOSE,
             ID_MRU,
         ]);
 
@@ -338,6 +344,7 @@ impl Niri {
                 (ID_SCREENSHOT_UI, screenshot_ui),
                 (ID_EXIT_CONFIRM_DIALOG, exit_confirm_dialog),
                 (ID_OVERVIEW, overview),
+                (ID_EXPOSE, expose),
                 (ID_MRU, mru),
             ],
             tree: Some(tree),

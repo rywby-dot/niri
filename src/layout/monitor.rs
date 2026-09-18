@@ -12,7 +12,7 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
-use super::tile::Tile;
+use super::tile::{Tile, TileRenderElement};
 use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
     WorkspaceRenderElement,
@@ -81,6 +81,7 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) overview_open: bool,
     /// Progress of the overview zoom animation, 1 is fully in overview.
     overview_progress: Option<OverviewProgress>,
+    expose: Option<Expose<W::Id>>,
     /// Clock for driving animations.
     pub(super) clock: Clock,
     /// Configurable properties of the layout as received from the parent layout.
@@ -89,6 +90,36 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) options: Rc<Options>,
     /// Layout config overrides for this monitor.
     layout_config: Option<niri_config::LayoutPart>,
+}
+
+#[derive(Debug)]
+struct Expose<I> {
+    open: bool,
+    animation: Animation,
+    windows: Vec<ExposeWindow<I>>,
+    area: Rectangle<f64, Logical>,
+    selected: usize,
+}
+
+#[derive(Debug)]
+struct ExposeWindow<I> {
+    id: I,
+    origin: Point<f64, Logical>,
+    target: Rectangle<f64, Logical>,
+    size: Size<f64, Logical>,
+    origin_scale: f64,
+}
+
+impl<I> ExposeWindow<I> {
+    fn geometry(&self, progress: f64) -> Rectangle<f64, Logical> {
+        Rectangle::new(
+            self.origin + (self.target.loc - self.origin).upscale(progress),
+            self.size.upscale(
+                self.origin_scale
+                    + (self.target.size.w / self.size.w - self.origin_scale) * progress,
+            ),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -187,6 +218,7 @@ impl<'a, W: LayoutElement> Clone for MonitorAddWindowTarget<'a, W> {
 niri_render_elements! {
     MonitorInnerRenderElement<R> => {
         Workspace = CropRenderElement<WorkspaceRenderElement<R>>,
+        Expose = TileRenderElement<R>,
         InsertHint = CropRenderElement<InsertHintRenderElement>,
         UncroppedInsertHint = InsertHintRenderElement,
         Shadow = ShadowRenderElement,
@@ -342,6 +374,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_render_loc: None,
             overview_open: false,
             overview_progress: None,
+            expose: None,
             workspace_switch: None,
             clock,
             base_options,
@@ -1030,7 +1063,159 @@ impl<W: LayoutElement> Monitor<W> {
         self.active_workspace_ref().active_window()
     }
 
+    pub(super) fn is_expose_open(&self) -> bool {
+        self.expose.as_ref().is_some_and(|expose| expose.open)
+    }
+
+    pub(super) fn cancel_expose(&mut self) {
+        self.expose = None;
+    }
+
+    pub(super) fn open_expose(&mut self) {
+        let zoom = self.overview_zoom();
+        let selected_id = self
+            .expose
+            .as_ref()
+            .and_then(|expose| expose.windows.get(expose.selected))
+            .map(|window| window.id.clone())
+            .or_else(|| self.active_window().map(|win| win.id().clone()));
+        let mut windows: Vec<_> = self
+            .workspaces_with_render_geo_cull(false)
+            .flat_map(|(ws, geo)| {
+                ws.tiles_with_render_positions().map(move |(tile, pos, _)| {
+                    (
+                        tile.opening_order,
+                        ExposeWindow {
+                            id: tile.window().id().clone(),
+                            origin: geo.loc + pos.upscale(zoom),
+                            target: Rectangle::default(),
+                            size: tile.tile_size(),
+                            origin_scale: zoom,
+                        },
+                    )
+                })
+            })
+            .collect();
+        windows.sort_by_key(|(order, _)| *order);
+        let sizes: Vec<_> = windows.iter().map(|(_, window)| window.size).collect();
+        let targets = super::expose::arrange(&sizes, self.working_area, 16.);
+        if let Some(expose) = &self.expose {
+            let progress = expose.animation.clamped_value();
+            for (_, window) in &mut windows {
+                if let Some(previous) = expose
+                    .windows
+                    .iter()
+                    .find(|previous| previous.id == window.id)
+                {
+                    let geo = previous.geometry(progress);
+                    window.origin = geo.loc;
+                    window.origin_scale = geo.size.w / window.size.w.max(1.);
+                }
+            }
+        }
+        let windows: Vec<_> = windows
+            .into_iter()
+            .zip(targets)
+            .map(|((_, mut window), target)| {
+                window.target = target;
+                window
+            })
+            .collect();
+        let selected = selected_id
+            .and_then(|id| windows.iter().position(|window| window.id == id))
+            .unwrap_or(0);
+        self.expose = Some(Expose {
+            open: true,
+            area: self.working_area,
+            selected,
+            animation: Animation::new(
+                self.clock.clone(),
+                0.,
+                1.,
+                0.,
+                self.options.animations.expose_open_close.0,
+            ),
+            windows,
+        });
+    }
+
+    pub(super) fn close_expose(&mut self) {
+        let Some(expose) = &mut self.expose else {
+            return;
+        };
+        if !expose.open {
+            return;
+        }
+        expose.open = false;
+        let progress = expose.animation.clamped_value();
+        for window in &mut expose.windows {
+            let geo = window.geometry(progress);
+            window.origin = geo.loc;
+            window.origin_scale = geo.size.w / window.size.w.max(1.);
+        }
+        expose.animation = Animation::new(
+            self.clock.clone(),
+            0.,
+            1.,
+            0.,
+            self.options.animations.expose_open_close.0,
+        );
+        self.retarget_expose();
+    }
+
+    pub(super) fn selected_expose_window(&self) -> Option<&W::Id> {
+        let expose = self.expose.as_ref().filter(|expose| expose.open)?;
+        expose.windows.get(expose.selected).map(|window| &window.id)
+    }
+
+    pub(super) fn cycle_expose(&mut self, forward: bool) {
+        let Some(expose) = self.expose.as_mut().filter(|expose| expose.open) else {
+            return;
+        };
+        let count = expose.windows.len();
+        if count == 0 {
+            return;
+        }
+        expose.selected = if forward {
+            (expose.selected + 1) % count
+        } else {
+            (expose.selected + count - 1) % count
+        };
+    }
+
+    /// Update destinations after choosing a window on a different workspace.
+    pub(super) fn retarget_expose(&mut self) {
+        let origins: Vec<_> = self
+            .workspaces_with_render_geo_cull(false)
+            .flat_map(|(ws, geo)| {
+                ws.tiles_with_render_positions().map(move |(tile, pos, _)| {
+                    (
+                        tile.window().id().clone(),
+                        Rectangle::new(geo.loc + pos, tile.tile_size()),
+                    )
+                })
+            })
+            .collect();
+        if let Some(expose) = &mut self.expose {
+            for window in &mut expose.windows {
+                if let Some((_, origin)) = origins.iter().find(|(id, _)| *id == window.id) {
+                    window.target = *origin;
+                }
+            }
+        }
+    }
+
     pub fn advance_animations(&mut self) {
+        if self.expose.as_ref().is_some_and(|expose| !expose.open) {
+            self.retarget_expose();
+        }
+        if self
+            .expose
+            .as_ref()
+            .is_some_and(|expose| !expose.open && expose.animation.is_done())
+        {
+            self.expose = None;
+        }
         match &mut self.workspace_switch {
             Some(WorkspaceSwitch::Animation(anim)) => {
                 if anim.is_done() {
@@ -1071,9 +1256,13 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub(super) fn are_animations_ongoing(&self) -> bool {
-        self.workspace_switch
+        self.expose
             .as_ref()
-            .is_some_and(|s| s.is_animation_ongoing())
+            .is_some_and(|expose| !expose.animation.is_done())
+            || self
+                .workspace_switch
+                .as_ref()
+                .is_some_and(|s| s.is_animation_ongoing())
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1086,6 +1275,36 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn update_render_elements(&mut self, is_active: bool) {
+        if let Some(expose) = &self.expose {
+            if expose.open
+                && (expose.area != self.working_area
+                    || expose.windows.len() != self.windows().count()
+                    || self
+                        .workspaces
+                        .iter()
+                        .flat_map(|ws| ws.tiles())
+                        .any(|tile| {
+                            !expose.windows.iter().any(|window| {
+                                window.id == *tile.window().id() && window.size == tile.tile_size()
+                            })
+                        }))
+            {
+                self.open_expose();
+            }
+        }
+        if self.expose.is_some() {
+            let selected = self.selected_expose_window().cloned();
+            for ws in &mut self.workspaces {
+                let view_size = self.view_size;
+                for (tile, pos) in ws.tiles_with_render_positions_mut(false) {
+                    tile.update_render_elements(
+                        selected.as_ref() == Some(tile.window().id()),
+                        Rectangle::new(pos.upscale(-1.), view_size),
+                    );
+                }
+            }
+            return;
+        }
         let mut insert_hint_ws_geo = None;
         let insert_hint_ws_id = self
             .insert_hint
@@ -1568,6 +1787,24 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
+        if let Some(expose) = &self.expose {
+            if !expose.open {
+                return None;
+            }
+            let progress = expose.animation.clamped_value();
+            let window = expose
+                .windows
+                .iter()
+                .rev()
+                .find(|window| window.geometry(progress).contains(pos_within_output))?;
+            let win = self.windows().find(|win| *win.id() == window.id)?;
+            return Some((
+                win,
+                HitType::Activate {
+                    is_tab_indicator: false,
+                },
+            ));
+        }
         let (ws, geo) = self.workspace_under(pos_within_output)?;
 
         if self.overview_progress.is_some() {
@@ -1584,7 +1821,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn resize_edges_under(&self, pos_within_output: Point<f64, Logical>) -> Option<ResizeEdge> {
-        if self.overview_progress.is_some() {
+        if self.overview_progress.is_some() || self.expose.is_some() {
             return None;
         }
 
@@ -1642,6 +1879,9 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn render_above_top_layer(&self) -> bool {
+        if self.expose.is_some() {
+            return true;
+        }
         // Render above the top layer only if the view is stationary.
         if self.workspace_switch.is_some() || self.overview_progress.is_some() {
             return false;
@@ -1685,6 +1925,37 @@ impl<W: LayoutElement> Monitor<W> {
         let _span = tracy_client::span!("Monitor::render_workspaces");
 
         let scale = self.scale.fractional_scale();
+        if let Some(expose) = &self.expose {
+            let progress = expose.animation.clamped_value();
+            for (idx, window) in expose.windows.iter().enumerate().rev() {
+                let Some(tile) = self
+                    .workspaces
+                    .iter()
+                    .flat_map(|ws| ws.tiles())
+                    .find(|tile| *tile.window().id() == window.id)
+                else {
+                    continue;
+                };
+                let geo = window.geometry(progress);
+                let zoom = geo.size.w / tile.tile_size().w.max(1.);
+                tile.render(
+                    ctx.r(),
+                    Point::default(),
+                    XrayPos::new(geo.loc, zoom),
+                    expose.open && idx == expose.selected,
+                    &mut |elem| {
+                        let elem = MonitorInnerRenderElement::Expose(elem);
+                        let elem = RescaleRenderElement::from_element(elem, Point::default(), zoom);
+                        push(RelocateRenderElement::from_element(
+                            elem,
+                            geo.loc.to_physical_precise_round(scale),
+                            Relocate::Relative,
+                        ));
+                    },
+                );
+            }
+            return;
+        }
         // Ceil the height in physical pixels.
         let height = (self.view_size.h * scale).ceil() as i32;
 

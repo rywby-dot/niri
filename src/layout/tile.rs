@@ -1,5 +1,6 @@
 use core::f64;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use niri_config::utils::MergeWith as _;
 use niri_config::{Color, CornerRadius, GradientInterpolation};
@@ -38,6 +39,8 @@ use crate::utils::{
 /// Toplevel window with decorations.
 #[derive(Debug)]
 pub struct Tile<W: LayoutElement> {
+    /// Stable creation order, retained when moving between workspaces and outputs.
+    pub(super) opening_order: u64,
     /// The toplevel window itself.
     window: W,
 
@@ -192,7 +195,10 @@ impl<W: LayoutElement> Tile<W> {
         let shadow_config = options.layout.shadow.merged_with(&rules.shadow);
         let sizing_mode = window.sizing_mode();
 
+        static NEXT_OPENING_ORDER: AtomicU64 = AtomicU64::new(0);
+
         Self {
+            opening_order: NEXT_OPENING_ORDER.fetch_add(1, Ordering::Relaxed),
             window,
             border: FocusRing::new(border_config.into()),
             focus_ring: FocusRing::new(focus_ring_config),

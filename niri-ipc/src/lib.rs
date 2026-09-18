@@ -914,6 +914,12 @@ pub enum Action {
     OpenOverview {},
     /// Close the Overview.
     CloseOverview {},
+    /// Toggle Exposé, showing all windows in a grid.
+    ToggleExpose {},
+    /// Open Exposé.
+    OpenExpose {},
+    /// Close Exposé.
+    CloseExpose {},
     /// Toggle urgent status of a window.
     ToggleWindowUrgent {
         /// Id of the window to toggle urgent.

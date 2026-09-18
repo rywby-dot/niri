@@ -400,6 +400,9 @@ binds {
     // or do a four-finger swipe up on a touchpad.
     Mod+O repeat=false { toggle-overview; }
 
+    // Show all windows in Exposé, then click a window or select it with Tab and Enter.
+    Mod+E repeat=false { toggle-expose; }
+
     Mod+Q repeat=false { close-window; }
 
     Mod+Left  { focus-column-left; }

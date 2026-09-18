@@ -537,6 +537,42 @@ impl State {
                     }
                 }
 
+                if this.niri.layout.is_expose_open()
+                    && !this.niri.is_locked()
+                    && !this.niri.screenshot_ui.is_open()
+                    && !this.niri.window_mru_ui.is_open()
+                    && pressed
+                    && matches!(
+                        raw,
+                        Some(
+                            Keysym::Escape
+                                | Keysym::Return
+                                | Keysym::Tab
+                                | Keysym::ISO_Left_Tab
+                                | Keysym::Left
+                                | Keysym::Right
+                                | Keysym::Up
+                                | Keysym::Down
+                        )
+                    )
+                {
+                    match raw {
+                        Some(Keysym::Escape) => this.niri.layout.close_expose(),
+                        Some(Keysym::Return) => this.niri.layout.confirm_expose(),
+                        Some(Keysym::ISO_Left_Tab | Keysym::Left | Keysym::Up) => {
+                            this.niri.layout.cycle_expose(false)
+                        }
+                        Some(Keysym::Tab) => this
+                            .niri
+                            .layout
+                            .cycle_expose(!modifiers.contains(Modifiers::SHIFT)),
+                        _ => this.niri.layout.cycle_expose(true),
+                    }
+                    this.niri.queue_redraw_all();
+                    this.niri.suppressed_keys.insert(key_code);
+                    return FilterResult::Intercept(None);
+                }
+
                 if pressed && raw == Some(Keysym::Escape) {
                     // Cancel certain grabs on Escape.
                     let pointer = this.niri.seat.get_pointer().unwrap();
@@ -575,6 +611,16 @@ impl State {
                 };
 
                 if matches!(res, FilterResult::Forward) {
+                    if this.niri.layout.is_expose_open()
+                        && !this.niri.is_locked()
+                        && !this.niri.screenshot_ui.is_open()
+                        && !this.niri.window_mru_ui.is_open()
+                    {
+                        if pressed {
+                            this.niri.suppressed_keys.insert(key_code);
+                        }
+                        return FilterResult::Intercept(None);
+                    }
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
                         if let Some(bind) = raw.and_then(|raw| hardcoded_overview_bind(raw, *mods))
@@ -2291,6 +2337,18 @@ impl State {
             Action::StopCast(session_id) => {
                 self.niri.stop_cast(CastSessionId::from(session_id));
             }
+            Action::ToggleExpose => {
+                self.niri.layout.toggle_expose();
+                self.niri.queue_redraw_all();
+            }
+            Action::OpenExpose => {
+                self.niri.layout.open_expose();
+                self.niri.queue_redraw_all();
+            }
+            Action::CloseExpose => {
+                self.niri.layout.close_expose();
+                self.niri.queue_redraw_all();
+            }
             Action::ToggleOverview => {
                 self.niri.layout.toggle_overview();
                 self.niri.queue_redraw_all();
@@ -2785,6 +2843,25 @@ impl State {
         let button_code = event.button_code();
 
         let button_state = event.state();
+
+        if self.niri.layout.is_expose_open()
+            && !self.niri.is_locked()
+            && !self.niri.screenshot_ui.is_open()
+            && !self.niri.window_mru_ui.is_open()
+            && button_state == ButtonState::Pressed
+        {
+            if button == Some(MouseButton::Left) {
+                if let Some(mapped) = self.niri.window_under_cursor() {
+                    let window = mapped.window.clone();
+                    self.niri.layout.select_expose_window(&window);
+                }
+            } else if button == Some(MouseButton::Right) {
+                self.niri.layout.close_expose();
+            }
+            self.niri.suppressed_buttons.insert(button_code);
+            self.niri.queue_redraw_all();
+            return;
+        }
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
@@ -3725,6 +3802,14 @@ impl State {
                             }
                         }
                     } else if !tool.is_grabbed() {
+                        if self.niri.layout.is_expose_open() {
+                            if let Some(mapped) = self.niri.window_under(pos) {
+                                let window = mapped.window.clone();
+                                self.niri.layout.select_expose_window(&window);
+                                self.niri.queue_redraw_all();
+                            }
+                            return;
+                        }
                         if self.niri.layout.is_overview_open()
                             && !mod_down
                             && under.layer.is_none()
@@ -4342,6 +4427,14 @@ impl State {
                 }
             }
         } else if !handle.is_grabbed() {
+            if self.niri.layout.is_expose_open() {
+                if let Some(mapped) = self.niri.window_under(pos) {
+                    let window = mapped.window.clone();
+                    self.niri.layout.select_expose_window(&window);
+                    self.niri.queue_redraw_all();
+                }
+                return;
+            }
             if self.niri.layout.is_overview_open()
                 && !mod_down
                 && under.layer.is_none()

@@ -426,6 +426,19 @@ animations {
 }
 ```
 
+#### `expose-open-close`
+
+The transition between the normal window layout and the [Exposé grid](./Overview.md#exposé).
+This animation is independent of `overview-open-close`.
+
+```kdl
+animations {
+    expose-open-close {
+        spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
+    }
+}
+```
+
 #### `recent-windows-close`
 
 <sup>Since: 25.11</sup>

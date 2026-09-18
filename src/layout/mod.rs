@@ -76,6 +76,7 @@ use crate::utils::{
 use crate::window::ResolvedWindowRules;
 
 pub mod closing_window;
+mod expose;
 pub mod floating;
 pub mod focus_ring;
 pub mod insert_hint_element;
@@ -758,6 +759,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
+        let expose_open = self.is_expose_open();
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
                 mut monitors,
@@ -834,6 +836,9 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
+                if expose_open {
+                    monitor.open_expose();
+                }
                 monitors.push(monitor);
 
                 MonitorSet::Normal {
@@ -3740,6 +3745,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn overview_gesture_begin(&mut self) {
+        for mon in self.monitors_mut() {
+            mon.cancel_expose();
+        }
         self.overview_open = true;
 
         let value = self.overview_progress.take().map_or(0., |p| p.value());
@@ -4613,7 +4621,72 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    pub fn is_expose_open(&self) -> bool {
+        self.monitors().any(|mon| mon.is_expose_open())
+    }
+
+    pub fn toggle_expose(&mut self) {
+        if self.is_expose_open() {
+            self.close_expose();
+        } else {
+            self.open_expose();
+        }
+    }
+
+    pub fn open_expose(&mut self) {
+        if self.is_expose_open() || self.interactive_move.is_some() {
+            return;
+        }
+        if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
+            for mon in monitors {
+                mon.open_expose();
+            }
+        }
+        self.overview_open = false;
+        self.overview_progress = None;
+        self.set_monitors_overview_state();
+    }
+
+    pub fn close_expose(&mut self) {
+        if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
+            for mon in monitors {
+                mon.close_expose();
+            }
+        }
+    }
+
+    pub fn cycle_expose(&mut self, forward: bool) {
+        if let Some(mon) = self.active_monitor() {
+            mon.cycle_expose(forward);
+        }
+    }
+
+    pub fn confirm_expose(&mut self) {
+        let window = self
+            .active_monitor_ref()
+            .and_then(|mon| mon.selected_expose_window())
+            .cloned();
+        if let Some(window) = window {
+            self.select_expose_window(&window);
+        } else {
+            self.close_expose();
+        }
+    }
+
+    pub fn select_expose_window(&mut self, window: &W::Id) {
+        self.activate_window(window);
+        if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
+            for mon in monitors {
+                mon.workspace_switch = None;
+            }
+        }
+        self.close_expose();
+    }
+
     pub fn toggle_overview(&mut self) {
+        for mon in self.monitors_mut() {
+            mon.cancel_expose();
+        }
         self.overview_open = !self.overview_open;
 
         let from = self.overview_progress.take().map_or(0., |p| p.value());

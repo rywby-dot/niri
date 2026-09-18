@@ -542,6 +542,7 @@ pub enum KeyboardFocus {
     ScreenshotUi,
     ExitConfirmDialog,
     Overview,
+    Expose,
     Mru,
 }
 
@@ -691,6 +692,7 @@ impl KeyboardFocus {
             KeyboardFocus::ScreenshotUi => None,
             KeyboardFocus::ExitConfirmDialog => None,
             KeyboardFocus::Overview => None,
+            KeyboardFocus::Expose => None,
             KeyboardFocus::Mru => None,
         }
     }
@@ -703,6 +705,7 @@ impl KeyboardFocus {
             KeyboardFocus::ScreenshotUi => None,
             KeyboardFocus::ExitConfirmDialog => None,
             KeyboardFocus::Overview => None,
+            KeyboardFocus::Expose => None,
             KeyboardFocus::Mru => None,
         }
     }
@@ -1287,6 +1290,9 @@ impl State {
             };
 
             let layout_focus = || {
+                if self.niri.layout.is_expose_open() {
+                    return Some(KeyboardFocus::Expose);
+                }
                 self.niri
                     .layout
                     .focus()
@@ -3306,7 +3312,7 @@ impl Niri {
         output: &Output,
         pos_within_output: Point<f64, Logical>,
     ) -> bool {
-        if self.layout.is_overview_open() {
+        if self.layout.is_overview_open() || self.layout.is_expose_open() {
             return false;
         }
 
@@ -3556,7 +3562,9 @@ impl Niri {
 
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
-        if mon.render_above_top_layer() {
+        if self.layout.is_expose_open() {
+            under = under.or_else(window_under);
+        } else if mon.render_above_top_layer() {
             under = under
                 .or_else(interactive_moved_window_under)
                 .or_else(window_under)
@@ -4134,6 +4142,7 @@ impl Niri {
             KeyboardFocus::ScreenshotUi => true,
             KeyboardFocus::ExitConfirmDialog => true,
             KeyboardFocus::Overview => true,
+            KeyboardFocus::Expose => true,
             KeyboardFocus::Mru => true,
         };
 
@@ -6777,6 +6786,9 @@ impl Niri {
     }
 
     pub fn handle_focus_follows_mouse(&mut self, new_focus: &PointContents) {
+        if self.layout.is_expose_open() {
+            return;
+        }
         let Some(ffm) = self.config.borrow().input.focus_follows_mouse else {
             return;
         };

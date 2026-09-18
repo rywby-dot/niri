@@ -642,6 +642,46 @@ mod tests {
     }
 
     #[test]
+    fn expose_binds_and_animation_are_independent_of_overview() {
+        use crate::animations::{Curve, EasingParams, Kind};
+        let config = do_parse(
+            r#"
+            binds {
+                Mod+E { toggle-expose; }
+                Mod+F { open-expose; }
+                Mod+G { close-expose; }
+            }
+            animations {
+                overview-open-close { off; }
+                expose-open-close { duration-ms 250; curve "linear"; }
+            }
+        "#,
+        );
+        assert!(config.animations.overview_open_close.0.off);
+        assert!(!config.animations.expose_open_close.0.off);
+        assert_eq!(
+            config.animations.expose_open_close.0.kind,
+            Kind::Easing(EasingParams {
+                duration_ms: 250,
+                curve: Curve::Linear
+            })
+        );
+        assert_eq!(
+            config
+                .binds
+                .0
+                .iter()
+                .map(|bind| bind.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                Action::ToggleExpose,
+                Action::OpenExpose,
+                Action::CloseExpose
+            ]
+        );
+    }
+
+    #[test]
     fn default_repeat_params() {
         let config = Config::parse_mem("").unwrap();
         assert_eq!(config.input.keyboard.repeat_delay, 600);
@@ -1655,6 +1695,18 @@ mod tests {
                     },
                 ),
                 overview_open_close: OverviewOpenCloseAnim(
+                    Animation {
+                        off: false,
+                        kind: Spring(
+                            SpringParams {
+                                damping_ratio: 1.0,
+                                stiffness: 800,
+                                epsilon: 0.0001,
+                            },
+                        ),
+                    },
+                ),
+                expose_open_close: ExposeOpenCloseAnim(
                     Animation {
                         off: false,
                         kind: Spring(

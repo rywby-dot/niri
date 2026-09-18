@@ -18,6 +18,7 @@ pub struct Animations {
     pub exit_confirmation_open_close: ExitConfirmationOpenCloseAnim,
     pub screenshot_ui_open: ScreenshotUiOpenAnim,
     pub overview_open_close: OverviewOpenCloseAnim,
+    pub expose_open_close: ExposeOpenCloseAnim,
     pub recent_windows_close: RecentWindowsCloseAnim,
 }
 
@@ -36,6 +37,7 @@ impl Default for Animations {
             exit_confirmation_open_close: Default::default(),
             screenshot_ui_open: Default::default(),
             overview_open_close: Default::default(),
+            expose_open_close: Default::default(),
             recent_windows_close: Default::default(),
         }
     }
@@ -70,6 +72,8 @@ pub struct AnimationsPart {
     #[knuffel(child)]
     pub overview_open_close: Option<OverviewOpenCloseAnim>,
     #[knuffel(child)]
+    pub expose_open_close: Option<ExposeOpenCloseAnim>,
+    #[knuffel(child)]
     pub recent_windows_close: Option<RecentWindowsCloseAnim>,
 }
 
@@ -96,6 +100,7 @@ impl MergeWith<AnimationsPart> for Animations {
             exit_confirmation_open_close,
             screenshot_ui_open,
             overview_open_close,
+            expose_open_close,
             recent_windows_close,
         );
     }
@@ -296,6 +301,15 @@ impl Default for ScreenshotUiOpenAnim {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverviewOpenCloseAnim(pub Animation);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExposeOpenCloseAnim(pub Animation);
+
+impl Default for ExposeOpenCloseAnim {
+    fn default() -> Self {
+        Self(OverviewOpenCloseAnim::default().0)
+    }
+}
 
 impl Default for OverviewOpenCloseAnim {
     fn default() -> Self {
@@ -506,6 +520,23 @@ where
         Ok(Self(Animation::decode_node(node, ctx, default, |_, _| {
             Ok(false)
         })?))
+    }
+}
+
+impl<S> knuffel::Decode<S> for ExposeOpenCloseAnim
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        Ok(Self(Animation::decode_node(
+            node,
+            ctx,
+            Self::default().0,
+            |_, _| Ok(false),
+        )?))
     }
 }
 
