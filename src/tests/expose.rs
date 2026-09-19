@@ -1,6 +1,7 @@
 use niri_config::gestures::HotCorners;
 use niri_config::output::Output as OutputConfig;
 use niri_config::{Action, Color, Config};
+use smithay::backend::input::Keycode;
 use smithay::backend::renderer::element::{Element as _, Id};
 use smithay::backend::renderer::Color32F;
 use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
@@ -108,14 +109,20 @@ fn closing_expose_restores_keyboard_focus_before_the_animation_finishes() {
         create_window(&mut f, id);
         if all_outputs {
             f.niri().layout.toggle_expose_all_outputs();
+            f.niri().suppressed_keys.insert(Keycode::from(42u32));
             f.niri_state()
                 .do_action(Action::ToggleExposeAllOutputs, false);
         } else {
             f.niri().layout.open_expose();
+            f.niri().suppressed_keys.insert(Keycode::from(42u32));
             f.niri_state().do_action(Action::ToggleExpose, false);
         }
         f.double_roundtrip(id);
 
+        assert!(f.niri().keyboard_focus.is_expose());
+        f.niri().suppressed_keys.clear();
+        f.niri_state().update_keyboard_focus();
+        f.double_roundtrip(id);
         assert!(matches!(
             &f.niri().keyboard_focus,
             KeyboardFocus::Layout {
