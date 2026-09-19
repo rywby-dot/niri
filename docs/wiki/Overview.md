@@ -63,6 +63,21 @@ The grid stays on that monitor while navigating, without moving the actual windo
 Choosing a remote window closes Exposé and focuses its original monitor and workspace.
 The all-output mode shares the same animation, navigation, repeat settings and decorations.
 
+Both Exposé modes can also be opened from hot corners:
+
+```kdl
+gestures {
+    hot-corners-expose { top-right; }
+    hot-corners-expose-all-outputs { bottom-right; }
+}
+```
+
+The same blocks can be placed in an `output` section to override them for a particular monitor.
+
+Switching directly between Overview, Exposé, and all-output Exposé animates from the current
+window positions. Running `toggle-expose` during all-output Exposé switches to the per-output
+Exposé grids.
+
 Click or tap a window to close Exposé and focus it, switching to its workspace when necessary.
 Left and Right select windows within the current row on the active output.
 Up and Down select the window closest horizontally in the adjacent row.

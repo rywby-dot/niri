@@ -25,6 +25,10 @@ output "eDP-1" {
         // bottom-right
     }
 
+    // Optional per-output overrides for the Exposé hot corners.
+    // hot-corners-expose { top-right; }
+    // hot-corners-expose-all-outputs { bottom-right; }
+
     layout {
         // ...layout settings for eDP-1...
     }
@@ -324,6 +328,20 @@ output "HDMI-A-1" {
 // Disable the hot corners on DP-2.
 output "DP-2" {
     hot-corners {
+        off
+    }
+}
+```
+
+`hot-corners-expose` and `hot-corners-expose-all-outputs` can be overridden in the same way.
+When absent, they inherit their respective blocks from `gestures`. For example:
+
+```kdl
+output "HDMI-A-1" {
+    hot-corners-expose {
+        top-right
+    }
+    hot-corners-expose-all-outputs {
         off
     }
 }

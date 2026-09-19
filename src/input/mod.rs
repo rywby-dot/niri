@@ -49,7 +49,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, ExposeDirection, LayoutElement as _};
-use crate::niri::{CastTarget, PointerVisibility, State};
+use crate::niri::{CastTarget, HotCornerAction, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
@@ -2493,6 +2493,24 @@ impl State {
         }
     }
 
+    fn trigger_hot_corner(&mut self, action: HotCornerAction, output: Option<&Output>) {
+        match action {
+            HotCornerAction::Overview => self.niri.layout.toggle_overview(),
+            HotCornerAction::Expose => {
+                if let Some(output) = output {
+                    self.niri.layout.focus_output(output);
+                }
+                self.niri.layout.toggle_expose();
+            }
+            HotCornerAction::ExposeAllOutputs => {
+                if let Some(output) = output {
+                    self.niri.layout.focus_output(output);
+                }
+                self.niri.layout.toggle_expose_all_outputs();
+            }
+        }
+    }
+
     fn on_pointer_motion<I: InputBackend>(&mut self, event: I::PointerMotionEvent) {
         let was_inside_hot_corner = self.niri.pointer_inside_hot_corner;
         // Any of the early returns here mean that the pointer is not inside the hot corner.
@@ -2707,15 +2725,17 @@ impl State {
 
         // contents_under() will return no surface when the hot corner should trigger, so
         // pointer.motion() will set the current focus to None.
-        if under.hot_corner && pointer.current_focus().is_none() {
-            if !was_inside_hot_corner
-                && pointer
-                    .with_grab(|_, grab| grab_allows_hot_corner(grab))
-                    .unwrap_or(true)
-            {
-                self.niri.layout.toggle_overview();
+        if let Some(action) = under.hot_corner {
+            if pointer.current_focus().is_none() {
+                if !was_inside_hot_corner
+                    && pointer
+                        .with_grab(|_, grab| grab_allows_hot_corner(grab))
+                        .unwrap_or(true)
+                {
+                    self.trigger_hot_corner(action, under.output.as_ref());
+                }
+                self.niri.pointer_inside_hot_corner = true;
             }
-            self.niri.pointer_inside_hot_corner = true;
         }
 
         // Activate a new confinement if necessary.
@@ -2798,15 +2818,17 @@ impl State {
 
         // contents_under() will return no surface when the hot corner should trigger, so
         // pointer.motion() will set the current focus to None.
-        if under.hot_corner && pointer.current_focus().is_none() {
-            if !was_inside_hot_corner
-                && pointer
-                    .with_grab(|_, grab| grab_allows_hot_corner(grab))
-                    .unwrap_or(true)
-            {
-                self.niri.layout.toggle_overview();
+        if let Some(action) = under.hot_corner {
+            if pointer.current_focus().is_none() {
+                if !was_inside_hot_corner
+                    && pointer
+                        .with_grab(|_, grab| grab_allows_hot_corner(grab))
+                        .unwrap_or(true)
+                {
+                    self.trigger_hot_corner(action, under.output.as_ref());
+                }
+                self.niri.pointer_inside_hot_corner = true;
             }
-            self.niri.pointer_inside_hot_corner = true;
         }
 
         self.niri.maybe_activate_pointer_constraint();
@@ -5447,6 +5469,33 @@ mod tests {
     use super::*;
     use crate::animation::Clock;
     use crate::tests::Fixture;
+
+    #[test]
+    fn expose_hot_corner_actions_use_the_pointer_output() {
+        let mut fixture = Fixture::new();
+        fixture.add_output(1, (1280, 720));
+        fixture.add_output(2, (1280, 720));
+        let output = fixture.niri_output(2);
+
+        fixture
+            .niri_state()
+            .trigger_hot_corner(HotCornerAction::ExposeAllOutputs, Some(&output));
+        assert_eq!(
+            fixture.niri().layout.all_outputs_expose_output(),
+            Some(&output)
+        );
+        fixture
+            .niri_state()
+            .trigger_hot_corner(HotCornerAction::ExposeAllOutputs, Some(&output));
+        fixture.niri_complete_animations();
+
+        fixture
+            .niri_state()
+            .trigger_hot_corner(HotCornerAction::Expose, Some(&output));
+        assert_eq!(fixture.niri().layout.active_output(), Some(&output));
+        assert!(fixture.niri().layout.is_expose_open());
+        assert!(!fixture.niri().layout.is_all_outputs_expose_open());
+    }
 
     #[test]
     fn key_repeat_reschedules_and_stops_when_requested() {

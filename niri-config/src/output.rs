@@ -77,6 +77,10 @@ pub struct Output {
     #[knuffel(child)]
     pub hot_corners: Option<HotCorners>,
     #[knuffel(child)]
+    pub hot_corners_expose: Option<HotCorners>,
+    #[knuffel(child)]
+    pub hot_corners_expose_all_outputs: Option<HotCorners>,
+    #[knuffel(child)]
     pub layout: Option<LayoutPart>,
 }
 
@@ -110,6 +114,8 @@ impl Default for Output {
             background_color: None,
             backdrop_color: None,
             hot_corners: None,
+            hot_corners_expose: None,
+            hot_corners_expose_all_outputs: None,
             layout: None,
         }
     }

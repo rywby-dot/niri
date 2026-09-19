@@ -1,3 +1,5 @@
+use niri_config::gestures::HotCorners;
+use niri_config::output::Output as OutputConfig;
 use niri_config::{Action, Color, Config};
 use smithay::backend::renderer::element::{Element as _, Id};
 use smithay::backend::renderer::Color32F;
@@ -13,7 +15,7 @@ use super::Fixture;
 use crate::layout::focus_ring::FocusRingRenderElement;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::{ExposeDirection, LayoutElement as _, SizingMode};
-use crate::niri::KeyboardFocus;
+use crate::niri::{HotCornerAction, KeyboardFocus};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{RenderCtx, RenderTarget};
 
@@ -28,6 +30,57 @@ fn create_window(f: &mut Fixture, id: ClientId) -> WlSurface {
     window.ack_last_and_commit();
     f.double_roundtrip(id);
     surface
+}
+
+#[test]
+fn expose_hot_corners_resolve_actions_and_per_output_overrides() {
+    let mut config = Config::default();
+    config.gestures.hot_corners_expose = Some(HotCorners {
+        top_right: true,
+        ..Default::default()
+    });
+    config.gestures.hot_corners_expose_all_outputs = Some(HotCorners::default());
+    config.outputs.0.push(OutputConfig {
+        name: "headless-2".into(),
+        hot_corners_expose: Some(HotCorners {
+            bottom_left: true,
+            ..Default::default()
+        }),
+        hot_corners_expose_all_outputs: Some(HotCorners {
+            off: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let output1 = f.niri_output(1);
+    let output2 = f.niri_output(2);
+    let geo1 = f.niri().global_space.output_geometry(&output1).unwrap();
+    let geo2 = f.niri().global_space.output_geometry(&output2).unwrap();
+
+    assert_eq!(
+        f.niri().contents_under(geo1.loc.to_f64()).hot_corner,
+        Some(HotCornerAction::ExposeAllOutputs)
+    );
+    assert_eq!(
+        f.niri()
+            .contents_under((geo1.loc + Point::from((geo1.size.w - 1, 0))).to_f64())
+            .hot_corner,
+        Some(HotCornerAction::Expose)
+    );
+    assert_eq!(
+        f.niri().contents_under(geo2.loc.to_f64()).hot_corner,
+        Some(HotCornerAction::Overview)
+    );
+    assert_eq!(
+        f.niri()
+            .contents_under((geo2.loc + Point::from((0, geo2.size.h - 1))).to_f64())
+            .hot_corner,
+        Some(HotCornerAction::Expose)
+    );
 }
 
 #[test]
@@ -176,6 +229,56 @@ fn egl_all_outputs_expose_preserves_geometry_across_output_scales() {
     }
     assert_eq!(f.niri().layout.windows_for_output(&host).count(), 1);
     assert_eq!(f.niri().layout.windows_for_output(&remote).count(), 1);
+
+    // Switching to per-output Exposé keeps the shared transition layer on every output until the
+    // local grids are ready. On the 2× output, both global positions must be converted to the
+    // destination output's physical coordinate space.
+    f.niri().layout.toggle_expose();
+    assert!(f.niri().layout.is_all_outputs_expose_on_output(&remote));
+    f.niri().update_render_elements(Some(&remote));
+    let transition_rects: [Rectangle<f64, smithay::utils::Logical>; 2] = [
+        Rectangle::new((-984., 16.).into(), Size::from((688., 688.))),
+        Rectangle::new((296., 16.).into(), Size::from((688., 688.))),
+    ];
+    let transition_expected: Vec<_> = expected
+        .iter()
+        .map(|(id, _)| id.clone())
+        .zip(transition_rects)
+        .collect();
+    let state = f.niri_state();
+    let mut transition_seen = Vec::new();
+    state
+        .backend
+        .with_primary_renderer(|renderer| {
+            state.niri.layout.render_workspaces_for_output(
+                RenderCtx {
+                    renderer,
+                    target: RenderTarget::Output,
+                    xray: None,
+                },
+                &remote,
+                false,
+                &mut |elem| {
+                    if let Some((id, rect)) =
+                        transition_expected.iter().find(|(id, _)| *id == *elem.id())
+                    {
+                        transition_seen.push((
+                            id.clone(),
+                            elem.geometry(2.0.into()),
+                            rect.to_physical_precise_round(2.),
+                        ));
+                    }
+                },
+            );
+        })
+        .unwrap();
+    assert_eq!(transition_seen.len(), 2);
+    for (_, actual, planned) in transition_seen {
+        assert_eq!(actual, planned);
+    }
+    f.niri_complete_animations();
+    assert!(f.niri().layout.all_outputs_expose_output().is_none());
+    assert!(f.niri().layout.is_expose_open());
 }
 
 #[test]

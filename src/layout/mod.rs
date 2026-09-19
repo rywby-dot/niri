@@ -2374,8 +2374,8 @@ impl<W: LayoutElement> Layout<W> {
         output: &Output,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<(&W, HitType)> {
-        if let Some(expose) = &self.all_outputs_expose {
-            if expose.output == *output {
+        if self.is_all_outputs_expose_on_output(output) {
+            if let Some(expose) = &self.all_outputs_expose {
                 let id = expose.window_under(pos_within_output)?;
                 let win = self.windows().find(|(_, win)| win.id() == id)?.1;
                 return Some((
@@ -3791,10 +3791,6 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn overview_gesture_begin(&mut self) {
-        self.all_outputs_expose = None;
-        for mon in self.monitors_mut() {
-            mon.cancel_expose();
-        }
         self.overview_open = true;
 
         let value = self.overview_progress.take().map_or(0., |p| p.value());
@@ -3806,6 +3802,10 @@ impl<W: LayoutElement> Layout<W> {
         self.overview_progress = Some(OverviewProgress::Gesture(gesture));
 
         self.set_monitors_overview_state();
+        self.transition_all_outputs_to_overview();
+        for mon in self.monitors_mut() {
+            mon.close_expose();
+        }
     }
 
     pub fn overview_gesture_update(&mut self, delta_y: f64, timestamp: Duration) -> Option<bool> {
@@ -4676,7 +4676,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_expose(&mut self) {
-        if self.is_expose_open() {
+        if self.is_all_outputs_expose_open() {
+            self.open_expose();
+        } else if self.monitors().any(|mon| mon.is_expose_open()) {
             self.close_expose();
         } else {
             self.open_expose();
@@ -4684,10 +4686,16 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn open_expose(&mut self) {
-        if self.is_expose_open() || self.interactive_move.is_some() {
+        if self.monitors().any(|mon| mon.is_expose_open()) || self.interactive_move.is_some() {
             return;
         }
-        self.all_outputs_expose = None;
+        if self.all_outputs_expose.is_some() {
+            self.transition_all_outputs_to_local_expose();
+            self.overview_open = false;
+            self.overview_progress = None;
+            self.set_monitors_overview_state();
+            return;
+        }
         if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
             for mon in monitors {
                 mon.open_expose();
@@ -4773,9 +4781,17 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_overview(&mut self) {
-        self.all_outputs_expose = None;
-        for mon in self.monitors_mut() {
-            mon.cancel_expose();
+        let expose_present =
+            self.all_outputs_expose.is_some() || self.monitors().any(|mon| mon.has_expose());
+        if !self.overview_open && expose_present {
+            self.overview_open = true;
+            self.overview_progress = Some(OverviewProgress::Open);
+            self.set_monitors_overview_state();
+            self.transition_all_outputs_to_overview();
+            for mon in self.monitors_mut() {
+                mon.close_expose();
+            }
+            return;
         }
         self.overview_open = !self.overview_open;
 

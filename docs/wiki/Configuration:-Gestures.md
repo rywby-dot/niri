@@ -28,6 +28,10 @@ gestures {
         // bottom-left
         // bottom-right
     }
+
+    // Disabled unless these blocks are present.
+    // hot-corners-expose { top-right; }
+    // hot-corners-expose-all-outputs { bottom-right; }
 }
 ```
 
@@ -113,3 +117,23 @@ gestures {
 ```
 
 You can also customize hot corners per-output [in the output config](./Configuration:-Outputs.md#hot-corners).
+
+Two independent hot-corner blocks can invoke Exposé instead of the overview:
+
+```kdl
+gestures {
+    // Show the windows from each monitor on that monitor.
+    hot-corners-expose {
+        top-right
+    }
+
+    // Gather windows from every monitor on the monitor containing the pointer.
+    // An empty block uses the top-left corner.
+    hot-corners-expose-all-outputs {}
+}
+```
+
+These blocks accept the same `off`, `top-left`, `top-right`, `bottom-left`, and `bottom-right`
+settings as `hot-corners`. They are disabled when omitted. If the same corner is assigned to
+multiple actions, `hot-corners-expose-all-outputs` takes priority, followed by
+`hot-corners-expose`, then `hot-corners`.

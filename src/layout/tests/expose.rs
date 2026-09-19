@@ -6,6 +6,42 @@ fn center(rect: Rectangle<f64, Logical>) -> Point<f64, Logical> {
     rect.loc + Point::from((rect.size.w / 2., rect.size.h / 2.))
 }
 
+fn overview_geometries(layout: &Layout<TestWindow>) -> Vec<(usize, Rectangle<f64, Logical>)> {
+    layout
+        .monitors()
+        .flat_map(|mon| {
+            let offset = mon.output.current_location().to_f64();
+            let zoom = mon.overview_zoom();
+            mon.workspaces_with_render_geo_cull(false)
+                .flat_map(move |(ws, geo)| {
+                    ws.tiles_with_render_positions().map(move |(tile, pos, _)| {
+                        (
+                            *tile.window().id(),
+                            Rectangle::new(
+                                offset + geo.loc + pos.upscale(zoom),
+                                tile.tile_size().upscale(zoom),
+                            ),
+                        )
+                    })
+                })
+        })
+        .collect()
+}
+
+fn assert_geometries_eq(
+    actual: &[(usize, Rectangle<f64, Logical>)],
+    expected: &[(usize, Rectangle<f64, Logical>)],
+) {
+    assert_eq!(actual.len(), expected.len());
+    for (id, actual) in actual {
+        let expected = expected.iter().find(|(other, _)| other == id).unwrap().1;
+        assert!((actual.loc.x - expected.loc.x).abs() < 0.001);
+        assert!((actual.loc.y - expected.loc.y).abs() < 0.001);
+        assert!((actual.size.w - expected.size.w).abs() < 0.001);
+        assert!((actual.size.h - expected.size.h).abs() < 0.001);
+    }
+}
+
 fn setup() -> Layout<TestWindow> {
     let mut options = Options::default();
     options.animations.expose_open_close.0.kind = Kind::Easing(EasingParams {
@@ -201,13 +237,148 @@ fn all_outputs_mode_switching_and_reopening_are_mutually_exclusive() {
     assert!(layout.is_all_outputs_expose_open());
     layout.toggle_overview();
     assert!(layout.is_overview_open());
+    assert!(layout.all_outputs_expose_output().is_some());
+    Op::CompleteAnimations.apply(&mut layout);
     assert!(layout.all_outputs_expose_output().is_none());
     layout.toggle_expose_all_outputs();
     assert!(!layout.is_overview_open());
     layout.close_expose();
     layout.open_expose();
     assert!(layout.is_expose_open());
+    assert!(layout.all_outputs_expose_output().is_some());
+    Op::CompleteAnimations.apply(&mut layout);
     assert!(layout.all_outputs_expose_output().is_none());
+    layout.verify_invariants();
+}
+
+#[test]
+fn expose_and_overview_transitions_preserve_window_geometry() {
+    let mut layout = setup();
+    layout.open_expose();
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    let expose = layout.expose_geometries_global();
+    let overview = {
+        layout.overview_open = true;
+        layout.overview_progress = Some(OverviewProgress::Open);
+        layout.set_monitors_overview_state();
+        let geometries = overview_geometries(&layout);
+        layout.overview_open = false;
+        layout.overview_progress = None;
+        layout.set_monitors_overview_state();
+        geometries
+    };
+
+    layout.toggle_overview();
+    assert!(layout.is_overview_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &expose);
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+    let midpoint: Vec<_> = expose
+        .iter()
+        .map(|(id, from)| {
+            let to = overview.iter().find(|(other, _)| other == id).unwrap().1;
+            (
+                *id,
+                Rectangle::new(
+                    from.loc + (to.loc - from.loc).upscale(0.5),
+                    Size::from((
+                        (from.size.w + to.size.w) / 2.,
+                        (from.size.h + to.size.h) / 2.,
+                    )),
+                ),
+            )
+        })
+        .collect();
+    assert_geometries_eq(&layout.expose_geometries_global(), &midpoint);
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+    assert!(layout.expose_geometries_global().is_empty());
+
+    let overview = overview_geometries(&layout);
+    layout.toggle_expose();
+    assert!(!layout.is_overview_open());
+    assert!(layout.is_expose_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &overview);
+    layout.verify_invariants();
+}
+
+#[test]
+fn local_and_all_outputs_expose_transition_without_normal_layout() {
+    let mut layout = setup_two_outputs();
+    layout.open_expose();
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    let local = layout.expose_geometries_global();
+
+    layout.toggle_expose_all_outputs();
+    assert!(layout.is_all_outputs_expose_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &local);
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    let all_outputs = layout.expose_geometries_global();
+
+    layout.toggle_expose();
+    assert!(!layout.is_all_outputs_expose_open());
+    assert!(layout.monitors().all(|mon| mon.is_expose_open()));
+    assert_geometries_eq(&layout.expose_geometries_global(), &all_outputs);
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    assert!(layout.all_outputs_expose_output().is_none());
+    assert!(layout.monitors().all(|mon| mon.is_expose_open()));
+    assert_geometries_eq(&layout.expose_geometries_global(), &local);
+    layout.verify_invariants();
+}
+
+#[test]
+fn overview_and_all_outputs_expose_transition_without_normal_layout() {
+    let mut layout = setup_two_outputs();
+    layout.toggle_overview();
+    Op::CompleteAnimations.apply(&mut layout);
+    let overview = overview_geometries(&layout);
+
+    layout.toggle_expose_all_outputs();
+    assert!(!layout.is_overview_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &overview);
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    let all_outputs = layout.expose_geometries_global();
+
+    layout.toggle_overview();
+    assert!(layout.is_overview_open());
+    assert!(!layout.is_all_outputs_expose_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &all_outputs);
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    assert!(layout.all_outputs_expose_output().is_none());
+    assert_geometries_eq(&overview_geometries(&layout), &overview);
+    layout.verify_invariants();
+}
+
+#[test]
+fn interrupted_mode_transitions_restart_from_current_geometry() {
+    let mut layout = setup_two_outputs();
+
+    layout.toggle_expose_all_outputs();
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    layout.toggle_expose();
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+    let all_to_local = layout.expose_geometries_global();
+    layout.toggle_expose_all_outputs();
+    assert!(layout.is_all_outputs_expose_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &all_to_local);
+
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    layout.toggle_overview();
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+    let all_to_overview = layout.expose_geometries_global();
+    layout.toggle_expose_all_outputs();
+    assert!(!layout.is_overview_open());
+    assert!(layout.is_all_outputs_expose_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &all_to_overview);
+
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    layout.toggle_expose();
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    layout.toggle_overview();
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+    let local_to_overview = layout.expose_geometries_global();
+    layout.toggle_expose();
+    assert!(!layout.is_overview_open());
+    assert!(layout.is_expose_open());
+    assert_geometries_eq(&layout.expose_geometries_global(), &local_to_overview);
     layout.verify_invariants();
 }
 

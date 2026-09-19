@@ -635,6 +635,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::gestures::HotCorners;
 
     #[test]
     fn can_create_default_config() {
@@ -680,6 +681,54 @@ mod tests {
                 Action::CloseExpose,
                 Action::ToggleExposeAllOutputs
             ]
+        );
+    }
+
+    #[test]
+    fn expose_hot_corners_parse_globally_and_per_output() {
+        let config = do_parse(
+            r#"
+            gestures {
+                hot-corners-expose {
+                    top-right
+                }
+                hot-corners-expose-all-outputs {}
+            }
+            output "DP-1" {
+                hot-corners-expose {
+                    bottom-left
+                }
+                hot-corners-expose-all-outputs {
+                    off
+                }
+            }
+        "#,
+        );
+
+        assert_eq!(
+            config.gestures.hot_corners_expose,
+            Some(HotCorners {
+                top_right: true,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            config.gestures.hot_corners_expose_all_outputs,
+            Some(HotCorners::default())
+        );
+        assert_eq!(
+            config.outputs.0[0].hot_corners_expose,
+            Some(HotCorners {
+                bottom_left: true,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            config.outputs.0[0].hot_corners_expose_all_outputs,
+            Some(HotCorners {
+                off: true,
+                ..Default::default()
+            })
         );
     }
 
@@ -1278,6 +1327,8 @@ mod tests {
                                 bottom_right: true,
                             },
                         ),
+                        hot_corners_expose: None,
+                        hot_corners_expose_all_outputs: None,
                         layout: None,
                     },
                     Output {
@@ -1305,6 +1356,8 @@ mod tests {
                         background_color: None,
                         backdrop_color: None,
                         hot_corners: None,
+                        hot_corners_expose: None,
+                        hot_corners_expose_all_outputs: None,
                         layout: None,
                     },
                     Output {
@@ -1335,6 +1388,8 @@ mod tests {
                         background_color: None,
                         backdrop_color: None,
                         hot_corners: None,
+                        hot_corners_expose: None,
+                        hot_corners_expose_all_outputs: None,
                         layout: None,
                     },
                 ],
@@ -1758,6 +1813,8 @@ mod tests {
                     bottom_left: false,
                     bottom_right: false,
                 },
+                hot_corners_expose: None,
+                hot_corners_expose_all_outputs: None,
             },
             overview: Overview {
                 zoom: 0.5,

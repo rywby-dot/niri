@@ -1049,6 +1049,10 @@ impl<W: LayoutElement> Monitor<W> {
         self.expose.as_ref().is_some_and(|expose| expose.open)
     }
 
+    pub(super) fn has_expose(&self) -> bool {
+        self.expose.is_some()
+    }
+
     pub(super) fn cancel_expose(&mut self) {
         self.expose = None;
     }
@@ -1057,6 +1061,12 @@ impl<W: LayoutElement> Monitor<W> {
         let expose = self.expose.as_ref()?;
         let window = expose.windows.iter().find(|window| window.id == *id)?;
         Some(window.geometry(expose.animation.clamped_value()))
+    }
+
+    pub(super) fn expose_window_target(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        let expose = self.expose.as_ref()?;
+        let window = expose.windows.iter().find(|window| window.id == *id)?;
+        Some(window.target)
     }
 
     pub(super) fn open_expose(&mut self) {
@@ -1195,13 +1205,14 @@ impl<W: LayoutElement> Monitor<W> {
 
     /// Update destinations after choosing a window on a different workspace.
     pub(super) fn retarget_expose(&mut self) {
+        let zoom = self.overview_zoom();
         let origins: Vec<_> = self
             .workspaces_with_render_geo_cull(false)
             .flat_map(|(ws, geo)| {
                 ws.tiles_with_render_positions().map(move |(tile, pos, _)| {
                     (
                         tile.window().id().clone(),
-                        Rectangle::new(geo.loc + pos, tile.tile_size()),
+                        Rectangle::new(geo.loc + pos.upscale(zoom), tile.tile_size().upscale(zoom)),
                     )
                 })
             })
