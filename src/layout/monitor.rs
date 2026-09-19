@@ -8,7 +8,7 @@ use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
 use super::expose::ExposeWindow;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
@@ -1083,7 +1083,7 @@ impl<W: LayoutElement> Monitor<W> {
                             origin: geo.loc + pos.upscale(zoom),
                             target: Rectangle::default(),
                             size: tile.tile_size(),
-                            origin_scale: zoom,
+                            origin_size: tile.tile_size().upscale(zoom),
                         },
                     )
                 })
@@ -1102,7 +1102,7 @@ impl<W: LayoutElement> Monitor<W> {
                 {
                     let geo = previous.geometry(progress);
                     window.origin = geo.loc;
-                    window.origin_scale = geo.size.w / window.size.w.max(1.);
+                    window.origin_size = geo.size;
                 }
             }
         }
@@ -1144,7 +1144,7 @@ impl<W: LayoutElement> Monitor<W> {
         for window in &mut expose.windows {
             let geo = window.geometry(progress);
             window.origin = geo.loc;
-            window.origin_scale = geo.size.w / window.size.w.max(1.);
+            window.origin_size = geo.size;
         }
         expose.animation = Animation::new(
             self.clock.clone(),
@@ -1161,23 +1161,7 @@ impl<W: LayoutElement> Monitor<W> {
         expose.windows.get(expose.selected).map(|window| &window.id)
     }
 
-    pub(super) fn sync_expose_selection(&mut self) {
-        let active = self.active_window().map(|window| window.id().clone());
-        if let Some(expose) = &mut self.expose {
-            if expose.open {
-                if let Some(selected) = expose
-                    .windows
-                    .iter()
-                    .position(|window| Some(&window.id) == active.as_ref())
-                {
-                    expose.selected = selected;
-                }
-            }
-        }
-    }
-
     pub(super) fn cycle_expose(&mut self, forward: bool) {
-        self.sync_expose_selection();
         let Some(expose) = self.expose.as_mut().filter(|expose| expose.open) else {
             return;
         };
@@ -1193,7 +1177,6 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub(super) fn focus_expose(&mut self, direction: super::ExposeDirection) {
-        self.sync_expose_selection();
         let Some(expose) = self.expose.as_mut().filter(|expose| expose.open) else {
             return;
         };
@@ -1314,9 +1297,6 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
         if self.expose.is_some() {
-            // Configured focus actions, new windows and closing windows must update
-            // the selection as well as the real layout focus.
-            self.sync_expose_selection();
             let selected = self.selected_expose_window().cloned();
             for ws in &mut self.workspaces {
                 let view_size = self.view_size;
@@ -1962,15 +1942,20 @@ impl<W: LayoutElement> Monitor<W> {
                     continue;
                 };
                 let geo = window.geometry(progress);
-                let zoom = geo.size.w / tile.tile_size().w.max(1.);
+                let zoom_x = geo.size.w / tile.tile_size().w.max(1.);
+                let zoom_y = geo.size.h / tile.tile_size().h.max(1.);
                 tile.render_expose(
                     ctx.r(),
                     Point::default(),
-                    XrayPos::new(geo.loc, zoom),
+                    XrayPos::new(geo.loc, zoom_x),
                     focus_ring && expose.open && idx == expose.selected,
                     &mut |elem| {
                         let elem = MonitorInnerRenderElement::Expose(elem);
-                        let elem = RescaleRenderElement::from_element(elem, Point::default(), zoom);
+                        let elem = RescaleRenderElement::from_element(
+                            elem,
+                            Point::default(),
+                            Scale::from((zoom_x, zoom_y)),
+                        );
                         push(RelocateRenderElement::from_element(
                             elem,
                             geo.loc.to_physical_precise_round(scale),

@@ -4,7 +4,7 @@ use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
 use super::monitor::{MonitorInnerRenderElement, MonitorRenderElement};
 use super::{Layout, LayoutElement};
@@ -20,17 +20,17 @@ pub(super) struct ExposeWindow<I> {
     pub(super) origin: Point<f64, Logical>,
     pub(super) target: Rectangle<f64, Logical>,
     pub(super) size: Size<f64, Logical>,
-    pub(super) origin_scale: f64,
+    pub(super) origin_size: Size<f64, Logical>,
 }
 
 impl<I> ExposeWindow<I> {
     pub(super) fn geometry(&self, progress: f64) -> Rectangle<f64, Logical> {
         Rectangle::new(
             self.origin + (self.target.loc - self.origin).upscale(progress),
-            self.size.upscale(
-                self.origin_scale
-                    + (self.target.size.w / self.size.w - self.origin_scale) * progress,
-            ),
+            Size::from((
+                self.origin_size.w + (self.target.size.w - self.origin_size.w) * progress,
+                self.origin_size.h + (self.target.size.h - self.origin_size.h) * progress,
+            )),
         )
     }
 }
@@ -56,6 +56,13 @@ enum AllOutputsExposeDestination {
 impl<I> AllOutputsExpose<I> {
     pub(super) fn selected_window(&self) -> Option<&I> {
         self.windows.get(self.selected).map(|window| &window.id)
+    }
+
+    pub(super) fn contains_window(&self, id: &I) -> bool
+    where
+        I: PartialEq,
+    {
+        self.windows.iter().any(|window| &window.id == id)
     }
 
     pub(super) fn window_under(&self, pos: Point<f64, Logical>) -> Option<&I> {
@@ -134,7 +141,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn is_all_outputs_expose_on_output(&self, output: &Output) -> bool {
         self.all_outputs_expose
             .as_ref()
-            .is_some_and(|expose| !expose.open || expose.output == *output)
+            .is_some_and(|expose| expose.output == *output)
     }
 
     pub fn toggle_expose_all_outputs(&mut self) {
@@ -181,7 +188,7 @@ impl<W: LayoutElement> Layout<W> {
                                 ExposeWindow {
                                     id: tile.window().id().clone(),
                                     origin: origin.loc,
-                                    origin_scale: origin.size.w / size.w.max(1.),
+                                    origin_size: origin.size,
                                     target: native,
                                     size,
                                 },
@@ -209,7 +216,7 @@ impl<W: LayoutElement> Layout<W> {
                 if let Some(old) = previous.windows.iter().find(|old| old.id == window.id) {
                     let rect = old.geometry(progress);
                     window.origin = offset + rect.loc;
-                    window.origin_scale = rect.size.w / window.size.w.max(1.);
+                    window.origin_size = rect.size;
                 }
             }
         }
@@ -260,20 +267,6 @@ impl<W: LayoutElement> Layout<W> {
         {
             self.open_all_outputs_expose(output);
         }
-        self.sync_all_outputs_expose_selection();
-    }
-
-    fn sync_all_outputs_expose_selection(&mut self) {
-        let focused = self.focus().map(|window| window.id().clone());
-        if let Some(expose) = &mut self.all_outputs_expose {
-            if let Some(idx) = expose
-                .windows
-                .iter()
-                .position(|window| Some(&window.id) == focused.as_ref())
-            {
-                expose.selected = idx;
-            }
-        }
     }
 
     pub(super) fn cycle_all_outputs_expose(&mut self, forward: bool) {
@@ -290,10 +283,6 @@ impl<W: LayoutElement> Layout<W> {
         } else {
             (expose.selected + count - 1) % count
         };
-        let selected = expose.selected_window().cloned();
-        if let Some(selected) = selected {
-            self.activate_window(&selected);
-        }
     }
 
     pub(super) fn focus_all_outputs_expose(&mut self, direction: ExposeDirection) {
@@ -304,8 +293,6 @@ impl<W: LayoutElement> Layout<W> {
         let targets: Vec<_> = expose.windows.iter().map(|window| window.target).collect();
         if let Some(idx) = neighbor(&targets, expose.selected, direction) {
             expose.selected = idx;
-            let selected = expose.windows[idx].id.clone();
-            self.activate_window(&selected);
         }
     }
 
@@ -333,7 +320,7 @@ impl<W: LayoutElement> Layout<W> {
         for window in &mut expose.windows {
             let rect = window.geometry(progress);
             window.origin = rect.loc;
-            window.origin_scale = rect.size.w / window.size.w.max(1.);
+            window.origin_size = rect.size;
             if let Some((_, target)) = targets.iter().find(|(id, _)| *id == window.id) {
                 window.target = *target;
             }
@@ -374,10 +361,24 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
-        for mon in self.monitors_mut() {
+        if let Some(mon) = self.monitor_for_output_mut(&host) {
             mon.open_expose();
         }
-        let targets = self.local_expose_targets(&host);
+        let local = self.local_expose_targets(&host);
+        let expose = self.all_outputs_expose.as_ref().unwrap();
+        let progress = expose.animation.clamped_value();
+        let targets = expose
+            .windows
+            .iter()
+            .map(|window| {
+                let current = window.geometry(progress);
+                let target = local
+                    .iter()
+                    .find(|(id, _)| *id == window.id)
+                    .map_or(current, |(_, target)| *target);
+                (window.id.clone(), target)
+            })
+            .collect();
         self.close_all_outputs_expose_to(targets, AllOutputsExposeDestination::LocalExpose);
     }
 
@@ -385,10 +386,29 @@ impl<W: LayoutElement> Layout<W> {
         let Some(expose) = self.all_outputs_expose.as_ref() else {
             return;
         };
-        let targets = self
-            .all_outputs_expose_windows(&expose.output)
-            .into_iter()
-            .map(|window| (window.id, window.target))
+        let host = expose.output.clone();
+        let progress = expose.animation.clamped_value();
+        let overview = self.all_outputs_expose_windows(&host);
+        let targets = expose
+            .windows
+            .iter()
+            .map(|window| {
+                let current = window.geometry(progress);
+                let is_host_window = self
+                    .windows()
+                    .find(|(_, candidate)| candidate.id() == &window.id)
+                    .and_then(|(mon, _)| mon)
+                    .is_some_and(|mon| mon.output == host);
+                let target = if is_host_window {
+                    overview
+                        .iter()
+                        .find(|candidate| candidate.id == window.id)
+                        .map_or(current, |candidate| candidate.target)
+                } else {
+                    current
+                };
+                (window.id.clone(), target)
+            })
             .collect();
         self.close_all_outputs_expose_to(targets, AllOutputsExposeDestination::Overview);
     }
@@ -404,14 +424,15 @@ impl<W: LayoutElement> Layout<W> {
             }
             let destination = expose.destination;
             let native = match destination {
-                AllOutputsExposeDestination::LocalExpose => {
-                    self.local_expose_targets(&expose.output)
-                }
-                AllOutputsExposeDestination::Layout | AllOutputsExposeDestination::Overview => self
+                AllOutputsExposeDestination::Layout => self
                     .all_outputs_expose_windows(&expose.output)
                     .into_iter()
                     .map(|window| (window.id, window.target))
                     .collect(),
+                AllOutputsExposeDestination::Overview => return,
+                AllOutputsExposeDestination::LocalExpose => {
+                    self.local_expose_targets(&expose.output)
+                }
             };
             for window in &mut self.all_outputs_expose.as_mut().unwrap().windows {
                 if let Some((_, target)) = native.iter().find(|(id, _)| *id == window.id) {
@@ -423,7 +444,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub(super) fn all_outputs_expose_animating(&self, output: Option<&Output>) -> bool {
         self.all_outputs_expose.as_ref().is_some_and(|expose| {
-            output.is_none_or(|output| !expose.open || expose.output == *output)
+            output.is_none_or(|output| expose.output == *output)
                 && (!expose.animation.is_done()
                     || self.monitors().any(|mon| mon.are_animations_ongoing()))
         })
@@ -439,10 +460,9 @@ impl<W: LayoutElement> Layout<W> {
         if let Some(expose) = self
             .all_outputs_expose
             .as_ref()
-            .filter(|expose| expose.output == *output || !expose.open)
+            .filter(|expose| expose.output == *output)
         {
             let scale = output.current_scale().fractional_scale();
-            let offset = (expose.output.current_location() - output.current_location()).to_f64();
             let progress = expose.animation.clamped_value();
             for (idx, window) in expose.windows.iter().enumerate().rev() {
                 let Some(tile) = self
@@ -452,13 +472,13 @@ impl<W: LayoutElement> Layout<W> {
                 else {
                     continue;
                 };
-                let mut rect = window.geometry(progress);
-                rect.loc += offset;
-                let zoom = rect.size.w / tile.tile_size().w.max(1.);
+                let rect = window.geometry(progress);
+                let zoom_x = rect.size.w / tile.tile_size().w.max(1.);
+                let zoom_y = rect.size.h / tile.tile_size().h.max(1.);
                 tile.render_expose(
                     ctx.r(),
                     Point::default(),
-                    XrayPos::new(rect.loc, zoom),
+                    XrayPos::new(rect.loc, zoom_x),
                     focus_ring && expose.open && idx == expose.selected,
                     &mut |elem| {
                         // Tile elements were prepared at the source output's physical scale.
@@ -467,7 +487,10 @@ impl<W: LayoutElement> Layout<W> {
                         let elem = RescaleRenderElement::from_element(
                             elem,
                             Point::default(),
-                            zoom * scale / tile.scale(),
+                            Scale::from((
+                                zoom_x * scale / tile.scale(),
+                                zoom_y * scale / tile.scale(),
+                            )),
                         );
                         push(RelocateRenderElement::from_element(
                             elem,

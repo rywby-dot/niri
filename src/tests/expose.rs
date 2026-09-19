@@ -100,6 +100,35 @@ fn close_action_targets_the_expose_selection() {
 }
 
 #[test]
+fn closing_expose_restores_keyboard_focus_before_the_animation_finishes() {
+    for all_outputs in [false, true] {
+        let mut f = Fixture::new();
+        f.add_output(1, (1280, 720));
+        let id = f.add_client();
+        create_window(&mut f, id);
+        if all_outputs {
+            f.niri().layout.toggle_expose_all_outputs();
+            f.niri_state()
+                .do_action(Action::ToggleExposeAllOutputs, false);
+        } else {
+            f.niri().layout.open_expose();
+            f.niri_state().do_action(Action::ToggleExpose, false);
+        }
+        f.double_roundtrip(id);
+
+        assert!(matches!(
+            &f.niri().keyboard_focus,
+            KeyboardFocus::Layout {
+                surface: Some(_)
+            }
+        ));
+        let output = f.niri().layout.active_output().unwrap().clone();
+        assert!(f.niri().layout.has_expose_on_output(&output));
+        f.niri_complete_animations();
+    }
+}
+
+#[test]
 fn top_layer_launcher_receives_focus_and_pointer_input_in_expose() {
     let mut f = Fixture::new();
     f.add_output(1, (1280, 720));
@@ -230,52 +259,11 @@ fn egl_all_outputs_expose_preserves_geometry_across_output_scales() {
     assert_eq!(f.niri().layout.windows_for_output(&host).count(), 1);
     assert_eq!(f.niri().layout.windows_for_output(&remote).count(), 1);
 
-    // Switching to per-output Exposé keeps the shared transition layer on every output until the
-    // local grids are ready. On the 2× output, both global positions must be converted to the
-    // destination output's physical coordinate space.
+    // Both Exposé variants are local to their host output. The remote output keeps rendering its
+    // regular workspace throughout the transition.
     f.niri().layout.toggle_expose();
-    assert!(f.niri().layout.is_all_outputs_expose_on_output(&remote));
-    f.niri().update_render_elements(Some(&remote));
-    let transition_rects: [Rectangle<f64, smithay::utils::Logical>; 2] = [
-        Rectangle::new((-984., 16.).into(), Size::from((688., 688.))),
-        Rectangle::new((296., 16.).into(), Size::from((688., 688.))),
-    ];
-    let transition_expected: Vec<_> = expected
-        .iter()
-        .map(|(id, _)| id.clone())
-        .zip(transition_rects)
-        .collect();
-    let state = f.niri_state();
-    let mut transition_seen = Vec::new();
-    state
-        .backend
-        .with_primary_renderer(|renderer| {
-            state.niri.layout.render_workspaces_for_output(
-                RenderCtx {
-                    renderer,
-                    target: RenderTarget::Output,
-                    xray: None,
-                },
-                &remote,
-                false,
-                &mut |elem| {
-                    if let Some((id, rect)) =
-                        transition_expected.iter().find(|(id, _)| *id == *elem.id())
-                    {
-                        transition_seen.push((
-                            id.clone(),
-                            elem.geometry(2.0.into()),
-                            rect.to_physical_precise_round(2.),
-                        ));
-                    }
-                },
-            );
-        })
-        .unwrap();
-    assert_eq!(transition_seen.len(), 2);
-    for (_, actual, planned) in transition_seen {
-        assert_eq!(actual, planned);
-    }
+    assert!(!f.niri().layout.is_all_outputs_expose_on_output(&remote));
+    assert_eq!(f.niri().layout.windows_rendered_on_output(&remote).count(), 1);
     f.niri_complete_animations();
     assert!(f.niri().layout.all_outputs_expose_output().is_none());
     assert!(f.niri().layout.is_expose_open());

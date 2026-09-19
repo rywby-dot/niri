@@ -37,8 +37,14 @@ fn assert_geometries_eq(
         let expected = expected.iter().find(|(other, _)| other == id).unwrap().1;
         assert!((actual.loc.x - expected.loc.x).abs() < 0.001);
         assert!((actual.loc.y - expected.loc.y).abs() < 0.001);
-        assert!((actual.size.w - expected.size.w).abs() < 0.001);
-        assert!((actual.size.h - expected.size.h).abs() < 0.001);
+        assert!(
+            (actual.size.w - expected.size.w).abs() < 0.001,
+            "window {id}: {actual:?} != {expected:?}"
+        );
+        assert!(
+            (actual.size.h - expected.size.h).abs() < 0.001,
+            "window {id}: {actual:?} != {expected:?}"
+        );
     }
 }
 
@@ -109,6 +115,39 @@ fn setup_two_outputs() -> Layout<TestWindow> {
     layout
 }
 
+#[test]
+fn expose_is_local_to_its_host_output() {
+    let mut layout = setup_two_outputs();
+    let host = layout.active_output().unwrap().clone();
+    let remote = layout.outputs().find(|output| **output != host).unwrap().clone();
+
+    layout.open_expose();
+
+    assert!(layout.is_expose_open_on_output(&host));
+    assert!(!layout.is_expose_open_on_output(&remote));
+    assert_eq!(layout.monitors().filter(|mon| mon.is_expose_open()).count(), 1);
+    assert_eq!(layout.windows_rendered_on_output(&remote).count(), 1);
+    layout.verify_invariants();
+}
+
+#[test]
+fn expose_can_be_opened_and_closed_independently_on_each_output() {
+    let mut layout = setup_two_outputs();
+    let first = layout.active_output().unwrap().clone();
+    layout.open_expose();
+    Op::FocusOutput(2).apply(&mut layout);
+    let second = layout.active_output().unwrap().clone();
+    assert_ne!(first, second);
+    layout.open_expose();
+
+    assert!(layout.is_expose_open_on_output(&first));
+    assert!(layout.is_expose_open_on_output(&second));
+    layout.toggle_expose();
+    assert!(layout.is_expose_open_on_output(&first));
+    assert!(!layout.is_expose_open_on_output(&second));
+    layout.verify_invariants();
+}
+
 fn all_targets(
     layout: &Layout<TestWindow>,
     output: &Output,
@@ -167,6 +206,9 @@ fn all_outputs_expose_shows_remote_windows_without_moving_them() {
         .output
         .clone();
     assert_ne!(remote, host);
+    assert!(layout.is_all_outputs_expose_on_output(&host));
+    assert!(!layout.is_all_outputs_expose_on_output(&remote));
+    assert_eq!(layout.windows_rendered_on_output(&remote).count(), 1);
     layout.select_expose_window(&3);
     assert!(!layout.is_expose_open());
     assert_eq!(*layout.focus().unwrap().id(), 3);
@@ -177,6 +219,72 @@ fn all_outputs_expose_shows_remote_windows_without_moving_them() {
 }
 
 #[test]
+fn remote_thumbnails_fly_towards_their_output_when_all_outputs_expose_closes() {
+    let mut layout = setup_two_outputs();
+    let host = layout.active_output().unwrap().clone();
+    let remote = layout.outputs().find(|output| **output != host).unwrap().clone();
+    remote.change_current_state(None, None, None, Some((1920, 0).into()));
+    layout.toggle_expose_all_outputs();
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    let before = layout
+        .expose_geometries_global()
+        .into_iter()
+        .find(|(id, _)| *id == 3)
+        .unwrap()
+        .1;
+
+    layout.close_expose();
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+    let during = layout
+        .expose_geometries_global()
+        .into_iter()
+        .find(|(id, _)| *id == 3)
+        .unwrap()
+        .1;
+
+    assert!(during.loc.x > before.loc.x, "{during:?} did not move right from {before:?}");
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+    assert!(layout.all_outputs_expose_output().is_none());
+    layout.verify_invariants();
+}
+
+#[test]
+fn resizing_a_window_restarts_expose_from_its_current_rectangle() {
+    for all_outputs in [false, true] {
+        let mut layout = if all_outputs { setup_two_outputs() } else { setup() };
+        if all_outputs {
+            layout.toggle_expose_all_outputs();
+        } else {
+            layout.open_expose();
+        }
+        Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+        let before = layout
+            .expose_geometries_global()
+            .into_iter()
+            .find(|(id, _)| *id == 1)
+            .unwrap()
+            .1;
+
+        Op::SetForcedSize {
+            id: 1,
+            size: Some(Size::from((300, 100))),
+        }
+        .apply(&mut layout);
+        Op::Communicate(1).apply(&mut layout);
+        layout.update_render_elements(None);
+        let after = layout
+            .expose_geometries_global()
+            .into_iter()
+            .find(|(id, _)| *id == 1)
+            .unwrap()
+            .1;
+
+        assert_eq!(after, before);
+        layout.verify_invariants();
+    }
+}
+
+#[test]
 fn all_outputs_keyboard_navigation_keeps_the_original_host() {
     let mut layout = setup_two_outputs();
     let host = layout.active_output().unwrap().clone();
@@ -184,13 +292,39 @@ fn all_outputs_keyboard_navigation_keeps_the_original_host() {
     for expected in [3, 1, 2] {
         layout.cycle_expose(true);
         assert_eq!(*layout.focus().unwrap().id(), expected);
+        assert_eq!(layout.active_output(), Some(&host));
         assert_eq!(layout.all_outputs_expose_output(), Some(&host));
         assert!(layout.is_expose_open());
     }
-    layout.activate_window(&3);
     layout.confirm_expose();
-    assert_eq!(*layout.focus().unwrap().id(), 3);
+    assert_eq!(*layout.focus().unwrap().id(), 2);
     assert!(!layout.is_expose_open());
+    layout.verify_invariants();
+}
+
+#[test]
+fn all_outputs_actions_apply_to_selection_without_changing_real_focus() {
+    let mut layout = setup_two_outputs();
+    let host = layout.active_output().unwrap().clone();
+    let real_focus = *layout.active_monitor_ref().unwrap().active_window().unwrap().id();
+    layout.toggle_expose_all_outputs();
+    layout.cycle_expose(true);
+    assert_eq!(*layout.focus().unwrap().id(), 3);
+
+    layout.set_column_width(SizeChange::SetFixed(300));
+
+    let remote = layout
+        .windows()
+        .find(|(_, window)| *window.id() == 3)
+        .unwrap()
+        .1;
+    assert_eq!(remote.requested_size().unwrap().w, 300);
+    assert_eq!(layout.active_output(), Some(&host));
+    assert_eq!(
+        *layout.active_monitor_ref().unwrap().active_window().unwrap().id(),
+        real_focus
+    );
+    assert!(layout.is_all_outputs_expose_open());
     layout.verify_invariants();
 }
 
@@ -309,17 +443,22 @@ fn local_and_all_outputs_expose_transition_without_normal_layout() {
 
     layout.toggle_expose_all_outputs();
     assert!(layout.is_all_outputs_expose_open());
-    assert_geometries_eq(&layout.expose_geometries_global(), &local);
+    let transition = layout.expose_geometries_global();
+    let host_windows: Vec<_> = transition
+        .into_iter()
+        .filter(|(id, _)| local.iter().any(|(local_id, _)| local_id == id))
+        .collect();
+    assert_geometries_eq(&host_windows, &local);
     Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
     let all_outputs = layout.expose_geometries_global();
 
     layout.toggle_expose();
     assert!(!layout.is_all_outputs_expose_open());
-    assert!(layout.monitors().all(|mon| mon.is_expose_open()));
+    assert_eq!(layout.monitors().filter(|mon| mon.is_expose_open()).count(), 1);
     assert_geometries_eq(&layout.expose_geometries_global(), &all_outputs);
     Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
     assert!(layout.all_outputs_expose_output().is_none());
-    assert!(layout.monitors().all(|mon| mon.is_expose_open()));
+    assert_eq!(layout.monitors().filter(|mon| mon.is_expose_open()).count(), 1);
     assert_geometries_eq(&layout.expose_geometries_global(), &local);
     layout.verify_invariants();
 }
@@ -473,7 +612,7 @@ fn visible_windows_move_directly_to_their_planned_positions() {
 }
 
 #[test]
-fn keyboard_selection_updates_focus_and_cancel_preserves_it() {
+fn keyboard_selection_does_not_change_focus_until_confirmed() {
     let mut layout = setup();
     let focus = *layout.focus().unwrap().id();
     layout.open_expose();
@@ -482,40 +621,53 @@ fn keyboard_selection_updates_focus_and_cancel_preserves_it() {
     assert_ne!(selected, focus);
     Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
     layout.close_expose();
-    assert_eq!(*layout.focus().unwrap().id(), selected);
+    assert_eq!(*layout.focus().unwrap().id(), focus);
     // Catch the closing transition and reverse it.
     layout.open_expose();
     assert!(layout.is_expose_open());
     Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
     layout.confirm_expose();
-    assert_eq!(*layout.focus().unwrap().id(), selected);
+    assert_eq!(*layout.focus().unwrap().id(), focus);
     Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
     layout.verify_invariants();
 }
 
 #[test]
-fn configured_focus_actions_are_respected_before_rendering() {
+fn external_focus_changes_do_not_replace_the_expose_selection() {
     let mut layout = setup();
     layout.open_expose();
     layout.activate_window(&1);
     layout.confirm_expose();
-    assert_eq!(*layout.focus().unwrap().id(), 1);
+    assert_eq!(*layout.focus().unwrap().id(), 2);
     assert!(!layout.is_expose_open());
     layout.verify_invariants();
 }
 
 #[test]
-fn arrow_selection_changes_real_focus_without_leaving_expose() {
+fn arrow_selection_changes_expose_target_without_changing_real_focus() {
     let mut layout = setup();
-    layout.open_expose();
     layout.activate_window(&1);
+    let real_focus = *layout.active_monitor_ref().unwrap().active_window().unwrap().id();
+    layout.open_expose();
     layout.focus_expose(ExposeDirection::Right);
     assert_eq!(*layout.focus().unwrap().id(), 2);
+    assert_eq!(
+        *layout.active_monitor_ref().unwrap().active_window().unwrap().id(),
+        real_focus
+    );
     assert!(layout.is_expose_open());
     layout.focus_expose(ExposeDirection::Right);
     assert_eq!(*layout.focus().unwrap().id(), 2);
+    assert_eq!(
+        *layout.active_monitor_ref().unwrap().active_window().unwrap().id(),
+        real_focus
+    );
     layout.focus_expose(ExposeDirection::Left);
     assert_eq!(*layout.focus().unwrap().id(), 1);
+    assert_eq!(
+        *layout.active_monitor_ref().unwrap().active_window().unwrap().id(),
+        real_focus
+    );
     layout.verify_invariants();
 }
 
@@ -540,7 +692,7 @@ fn windows_and_outputs_can_change_while_expose_is_open() {
     let mut layout = setup();
     layout.open_expose();
     Op::AddOutput(2).apply(&mut layout);
-    assert!(layout.monitors().all(|mon| mon.is_expose_open()));
+    assert_eq!(layout.monitors().filter(|mon| mon.is_expose_open()).count(), 1);
     Op::AddWindow {
         params: TestWindowParams::new(3),
     }

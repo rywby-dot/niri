@@ -1302,7 +1302,7 @@ impl State {
             };
 
             let layout_focus = || {
-                if self.niri.layout.is_expose_open() {
+                if self.niri.layout.is_expose_open_on_output(output) {
                     return Some(KeyboardFocus::Expose);
                 }
                 self.niri
@@ -3347,7 +3347,7 @@ impl Niri {
         output: &Output,
         pos_within_output: Point<f64, Logical>,
     ) -> bool {
-        if self.layout.is_overview_open() || self.layout.is_expose_open() {
+        if self.layout.is_overview_open() || self.layout.has_expose_on_output(output) {
             return false;
         }
 
@@ -3595,9 +3595,7 @@ impl Niri {
 
         let is_overview_open = self.layout.is_overview_open();
 
-        let expose_on_output = self.layout.is_expose_open()
-            && (!self.layout.is_all_outputs_expose_open()
-                || self.layout.is_all_outputs_expose_on_output(output));
+        let expose_on_output = self.layout.has_expose_on_output(output);
         let render_above_top_layer =
             mon.render_above_top_layer() && !self.layout.is_all_outputs_expose_on_output(output);
 
@@ -6852,7 +6850,11 @@ impl Niri {
     }
 
     pub fn handle_focus_follows_mouse(&mut self, new_focus: &PointContents) {
-        if self.layout.is_expose_open() {
+        if new_focus
+            .output
+            .as_ref()
+            .is_some_and(|output| self.layout.is_expose_open_on_output(output))
+        {
             return;
         }
         let Some(ffm) = self.config.borrow().input.focus_follows_mouse else {

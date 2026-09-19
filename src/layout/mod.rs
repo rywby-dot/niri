@@ -764,7 +764,6 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
-        let expose_open = self.monitors().any(|mon| mon.is_expose_open());
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
                 mut monitors,
@@ -841,9 +840,6 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
-                if expose_open {
-                    monitor.open_expose();
-                }
                 monitors.push(monitor);
 
                 MonitorSet::Normal {
@@ -2322,7 +2318,44 @@ impl<W: LayoutElement> Layout<W> {
         self.focus_with_output().map(|(win, _out)| win)
     }
 
+    fn expose_target(&self) -> Option<&W::Id> {
+        let output = self.active_output()?;
+        self.all_outputs_expose
+            .as_ref()
+            .filter(|expose| expose.open && expose.output == *output)
+            .and_then(|expose| expose.selected_window())
+            .or_else(|| {
+                self.monitor_for_output(output)
+                    .and_then(|mon| mon.selected_expose_window())
+            })
+    }
+
     pub fn focus_with_output(&self) -> Option<(&W, &Output)> {
+        if let Some(selected) = self
+            .all_outputs_expose
+            .as_ref()
+            .filter(|expose| expose.open)
+            .and_then(|expose| expose.selected_window())
+        {
+            return self.windows().find_map(|(mon, window)| {
+                let mon = mon?;
+                (window.id() == selected).then_some((window, &mon.output))
+            });
+        }
+        if let Some((output, selected)) = self.monitors().find_map(|mon| {
+            mon.selected_expose_window()
+                .map(|selected| (&mon.output, selected))
+        }) {
+            return self
+                .windows_for_output(output)
+                .find(|window| window.id() == selected)
+                .map(|window| (window, output));
+        }
+
+        self.focus_with_output_raw()
+    }
+
+    fn focus_with_output_raw(&self) -> Option<(&W, &Output)> {
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             return Some((move_.tile.window(), &move_.output));
         }
@@ -3118,6 +3151,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_column_width(&mut self, change: SizeChange) {
+        if let Some(window) = self.expose_target().cloned() {
+            self.set_window_width(Some(&window), change);
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
@@ -3125,6 +3162,11 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        let expose_target = window
+            .is_none()
+            .then(|| self.expose_target().cloned())
+            .flatten();
+        let window = window.or(expose_target.as_ref());
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3148,6 +3190,11 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        let expose_target = window
+            .is_none()
+            .then(|| self.expose_target().cloned())
+            .flatten();
+        let window = window.or(expose_target.as_ref());
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3171,6 +3218,11 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
+        let expose_target = window
+            .is_none()
+            .then(|| self.expose_target().cloned())
+            .flatten();
+        let window = window.or(expose_target.as_ref());
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -4675,31 +4727,70 @@ impl<W: LayoutElement> Layout<W> {
             || self.monitors().any(|mon| mon.is_expose_open())
     }
 
+    pub fn is_expose_open_on_output(&self, output: &Output) -> bool {
+        self.all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.open && expose.output == *output)
+            || self
+                .monitor_for_output(output)
+                .is_some_and(|mon| mon.is_expose_open())
+    }
+
+    pub fn has_expose_on_output(&self, output: &Output) -> bool {
+        self.all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.output == *output)
+            || self
+                .monitor_for_output(output)
+                .is_some_and(|mon| mon.has_expose())
+    }
+
     pub fn toggle_expose(&mut self) {
-        if self.is_all_outputs_expose_open() {
+        let Some(output) = self.active_output().cloned() else {
+            return;
+        };
+        if self
+            .all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.open && expose.output == output)
+        {
             self.open_expose();
-        } else if self.monitors().any(|mon| mon.is_expose_open()) {
-            self.close_expose();
+        } else if self
+            .monitor_for_output(&output)
+            .is_some_and(|mon| mon.is_expose_open())
+        {
+            self.close_expose_on_output(&output);
         } else {
             self.open_expose();
         }
     }
 
     pub fn open_expose(&mut self) {
-        if self.monitors().any(|mon| mon.is_expose_open()) || self.interactive_move.is_some() {
+        if self.interactive_move.is_some() {
             return;
         }
-        if self.all_outputs_expose.is_some() {
+        let Some(output) = self.active_output().cloned() else {
+            return;
+        };
+        if self
+            .monitor_for_output(&output)
+            .is_some_and(|mon| mon.is_expose_open())
+        {
+            return;
+        }
+        if self
+            .all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.output == output)
+        {
             self.transition_all_outputs_to_local_expose();
             self.overview_open = false;
             self.overview_progress = None;
             self.set_monitors_overview_state();
             return;
         }
-        if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
-            for mon in monitors {
-                mon.open_expose();
-            }
+        if let Some(mon) = self.active_monitor() {
+            mon.open_expose();
         }
         self.overview_open = false;
         self.overview_progress = None;
@@ -4707,60 +4798,79 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn close_expose(&mut self) {
-        self.close_all_outputs_expose();
-        if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
-            for mon in monitors {
-                mon.close_expose();
-            }
+        let Some(output) = self.active_output().cloned() else {
+            return;
+        };
+        self.close_expose_on_output(&output);
+    }
+
+    fn close_expose_on_output(&mut self, output: &Output) {
+        if self
+            .all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.output == *output)
+        {
+            self.close_all_outputs_expose();
+        }
+        if let Some(mon) = self.monitor_for_output_mut(output) {
+            mon.close_expose();
         }
     }
 
     pub fn cycle_expose(&mut self, forward: bool) {
-        if self.is_all_outputs_expose_open() {
+        let output = self.active_output().cloned();
+        if output.as_ref().is_some_and(|output| {
+            self.all_outputs_expose
+                .as_ref()
+                .is_some_and(|expose| expose.open && expose.output == *output)
+        }) {
             self.cycle_all_outputs_expose(forward);
             return;
         }
-        if let Some(mon) = self.active_monitor() {
+        if let Some(mon) = output
+            .as_ref()
+            .and_then(|output| self.monitor_for_output_mut(output))
+        {
             mon.cycle_expose(forward);
         }
-        self.focus_expose_selection();
     }
 
     pub fn focus_expose(&mut self, direction: ExposeDirection) {
-        if self.is_all_outputs_expose_open() {
+        let output = self.active_output().cloned();
+        if output.as_ref().is_some_and(|output| {
+            self.all_outputs_expose
+                .as_ref()
+                .is_some_and(|expose| expose.open && expose.output == *output)
+        }) {
             self.focus_all_outputs_expose(direction);
             return;
         }
-        if let Some(mon) = self.active_monitor() {
+        if let Some(mon) = output
+            .as_ref()
+            .and_then(|output| self.monitor_for_output_mut(output))
+        {
             mon.focus_expose(direction);
-        }
-        self.focus_expose_selection();
-    }
-
-    fn focus_expose_selection(&mut self) {
-        let window = self
-            .active_monitor_ref()
-            .and_then(|mon| mon.selected_expose_window())
-            .cloned();
-        if let Some(window) = window {
-            self.activate_window(&window);
         }
     }
 
     pub fn confirm_expose(&mut self) {
-        if self.is_all_outputs_expose_open() {
+        let Some(output) = self.active_output().cloned() else {
+            return;
+        };
+        if self
+            .all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.open && expose.output == output)
+        {
             if let Some(window) = self.focus().map(|window| window.id().clone()) {
                 self.select_expose_window(&window);
             } else {
-                self.close_expose();
+                self.close_expose_on_output(&output);
             }
             return;
         }
-        if let Some(mon) = self.active_monitor() {
-            mon.sync_expose_selection();
-        }
         let window = self
-            .active_monitor_ref()
+            .monitor_for_output(&output)
             .and_then(|mon| mon.selected_expose_window())
             .cloned();
         if let Some(window) = window {
@@ -4771,13 +4881,27 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn select_expose_window(&mut self, window: &W::Id) {
+        let expose_output = self
+            .all_outputs_expose
+            .as_ref()
+            .filter(|expose| expose.open && expose.contains_window(window))
+            .map(|expose| expose.output.clone())
+            .or_else(|| {
+                self.monitors()
+                    .find(|mon| {
+                        mon.is_expose_open() && mon.expose_window_geometry(window).is_some()
+                    })
+                    .map(|mon| mon.output.clone())
+            });
         self.activate_window(window);
         if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
             for mon in monitors {
                 mon.workspace_switch = None;
             }
         }
-        self.close_expose();
+        if let Some(output) = expose_output {
+            self.close_expose_on_output(&output);
+        }
     }
 
     pub fn toggle_overview(&mut self) {

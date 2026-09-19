@@ -2932,15 +2932,15 @@ impl State {
             self.niri.pointer_visibility = PointerVisibility::Visible;
             self.niri.tablet_cursor_location = None;
 
-            if self.niri.layout.is_expose_open()
+            let under = self.niri.contents_under(pointer.current_location());
+            if under
+                .output
+                .as_ref()
+                .is_some_and(|output| self.niri.layout.is_expose_open_on_output(output))
                 && !self.niri.is_locked()
                 && !self.niri.screenshot_ui.is_open()
                 && !self.niri.window_mru_ui.is_open()
-                && self
-                    .niri
-                    .contents_under(pointer.current_location())
-                    .layer
-                    .is_none()
+                && under.layer.is_none()
             {
                 if button == Some(MouseButton::Left) {
                     if let Some(mapped) = self.niri.window_under_cursor() {
@@ -3832,7 +3832,14 @@ impl State {
                             }
                         }
                     } else if !tool.is_grabbed() {
-                        if self.niri.layout.is_expose_open() && under.layer.is_none() {
+                        if under
+                            .output
+                            .as_ref()
+                            .is_some_and(|output| {
+                                self.niri.layout.is_expose_open_on_output(output)
+                            })
+                            && under.layer.is_none()
+                        {
                             if let Some(mapped) = self.niri.window_under(pos) {
                                 let window = mapped.window.clone();
                                 self.niri.layout.select_expose_window(&window);
@@ -4457,7 +4464,12 @@ impl State {
                 }
             }
         } else if !handle.is_grabbed() {
-            if self.niri.layout.is_expose_open() && under.layer.is_none() {
+            if under
+                .output
+                .as_ref()
+                .is_some_and(|output| self.niri.layout.is_expose_open_on_output(output))
+                && under.layer.is_none()
+            {
                 if let Some(mapped) = self.niri.window_under(pos) {
                     let window = mapped.window.clone();
                     self.niri.layout.select_expose_window(&window);
