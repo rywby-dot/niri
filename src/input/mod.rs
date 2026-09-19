@@ -2341,6 +2341,10 @@ impl State {
                 self.niri.layout.toggle_expose();
                 self.niri.queue_redraw_all();
             }
+            Action::ToggleExposeAllOutputs => {
+                self.niri.layout.toggle_expose_all_outputs();
+                self.niri.queue_redraw_all();
+            }
             Action::OpenExpose => {
                 self.niri.layout.open_expose();
                 self.niri.queue_redraw_all();

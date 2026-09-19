@@ -373,6 +373,8 @@ pub struct Layout<W: LayoutElement> {
     overview_open: bool,
     /// The overview zoom progress.
     overview_progress: Option<OverviewProgress>,
+    /// Exposé gathering all outputs on the output where it was opened.
+    all_outputs_expose: Option<expose::AllOutputsExpose<W::Id>>,
     /// Configurable properties of the layout.
     options: Rc<Options>,
 }
@@ -730,6 +732,7 @@ impl<W: LayoutElement> Layout<W> {
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
             overview_progress: None,
+            all_outputs_expose: None,
             options: Rc::new(options),
         }
     }
@@ -755,12 +758,13 @@ impl<W: LayoutElement> Layout<W> {
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
             overview_progress: None,
+            all_outputs_expose: None,
             options: opts,
         }
     }
 
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
-        let expose_open = self.is_expose_open();
+        let expose_open = self.monitors().any(|mon| mon.is_expose_open());
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
                 mut monitors,
@@ -872,6 +876,13 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn remove_output(&mut self, output: &Output) {
+        if self
+            .all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.output == *output)
+        {
+            self.all_outputs_expose = None;
+        }
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
                 mut monitors,
@@ -2363,6 +2374,18 @@ impl<W: LayoutElement> Layout<W> {
         output: &Output,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<(&W, HitType)> {
+        if let Some(expose) = &self.all_outputs_expose {
+            if expose.output == *output {
+                let id = expose.window_under(pos_within_output)?;
+                let win = self.windows().find(|(_, win)| win.id() == id)?.1;
+                return Some((
+                    win,
+                    HitType::Activate {
+                        is_tab_indicator: false,
+                    },
+                ));
+            }
+        }
         let mon = self.monitor_for_output(output)?;
         mon.window_under(pos_within_output)
     }
@@ -2372,6 +2395,9 @@ impl<W: LayoutElement> Layout<W> {
         output: &Output,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<ResizeEdge> {
+        if self.is_all_outputs_expose_open() {
+            return None;
+        }
         let mon = self.monitor_for_output(output)?;
         mon.resize_edges_under(pos_within_output)
     }
@@ -2616,6 +2642,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn advance_animations(&mut self) {
+        self.advance_all_outputs_expose();
         let _span = tracy_client::span!("Layout::advance_animations");
 
         let mut dnd_scroll = None;
@@ -2754,6 +2781,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn are_animations_ongoing(&self, output: Option<&Output>) -> bool {
+        if self.all_outputs_expose_animating(output) {
+            return true;
+        }
         // Keep advancing animations if we might need to scroll the view.
         if let Some(dnd) = &self.dnd {
             if output.is_none_or(|output| *output == dnd.output) {
@@ -2821,6 +2851,7 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         self.update_insert_hint(output);
+        self.refresh_all_outputs_expose();
 
         let MonitorSet::Normal {
             monitors,
@@ -2841,6 +2872,20 @@ impl<W: LayoutElement> Layout<W> {
                     && !matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_)));
                 mon.set_overview_progress(self.overview_progress.as_ref());
                 mon.update_render_elements(is_active);
+            }
+        }
+        if let Some(expose) = &self.all_outputs_expose {
+            let selected = expose.selected_window().cloned();
+            for mon in monitors {
+                for ws in &mut mon.workspaces {
+                    let view_size = output_size(&mon.output);
+                    for (tile, pos) in ws.tiles_with_render_positions_mut(false) {
+                        tile.update_expose_render_elements(
+                            self.is_active && selected.as_ref() == Some(tile.window().id()),
+                            Rectangle::new(pos.upscale(-1.), view_size),
+                        );
+                    }
+                }
             }
         }
     }
@@ -3746,6 +3791,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn overview_gesture_begin(&mut self) {
+        self.all_outputs_expose = None;
         for mon in self.monitors_mut() {
             mon.cancel_expose();
         }
@@ -4623,7 +4669,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn is_expose_open(&self) -> bool {
-        self.monitors().any(|mon| mon.is_expose_open())
+        self.all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.open)
+            || self.monitors().any(|mon| mon.is_expose_open())
     }
 
     pub fn toggle_expose(&mut self) {
@@ -4638,6 +4687,7 @@ impl<W: LayoutElement> Layout<W> {
         if self.is_expose_open() || self.interactive_move.is_some() {
             return;
         }
+        self.all_outputs_expose = None;
         if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
             for mon in monitors {
                 mon.open_expose();
@@ -4649,6 +4699,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn close_expose(&mut self) {
+        self.close_all_outputs_expose();
         if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
             for mon in monitors {
                 mon.close_expose();
@@ -4657,6 +4708,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn cycle_expose(&mut self, forward: bool) {
+        if self.is_all_outputs_expose_open() {
+            self.cycle_all_outputs_expose(forward);
+            return;
+        }
         if let Some(mon) = self.active_monitor() {
             mon.cycle_expose(forward);
         }
@@ -4664,6 +4719,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_expose(&mut self, direction: ExposeDirection) {
+        if self.is_all_outputs_expose_open() {
+            self.focus_all_outputs_expose(direction);
+            return;
+        }
         if let Some(mon) = self.active_monitor() {
             mon.focus_expose(direction);
         }
@@ -4681,6 +4740,14 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn confirm_expose(&mut self) {
+        if self.is_all_outputs_expose_open() {
+            if let Some(window) = self.focus().map(|window| window.id().clone()) {
+                self.select_expose_window(&window);
+            } else {
+                self.close_expose();
+            }
+            return;
+        }
         if let Some(mon) = self.active_monitor() {
             mon.sync_expose_selection();
         }
@@ -4706,6 +4773,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_overview(&mut self) {
+        self.all_outputs_expose = None;
         for mon in self.monitors_mut() {
             mon.cancel_expose();
         }

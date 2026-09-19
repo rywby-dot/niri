@@ -1353,7 +1353,9 @@ impl State {
 
             surface = surface.or_else(|| focus_on_layer(Layer::Overlay));
 
-            if mon.render_above_top_layer() {
+            if mon.render_above_top_layer()
+                && !self.niri.layout.is_all_outputs_expose_on_output(output)
+            {
                 surface = surface.or_else(layout_focus);
                 surface = surface.or_else(|| focus_on_layer(Layer::Top));
                 surface = surface.or_else(|| focus_on_layer(Layer::Bottom));
@@ -3296,7 +3298,7 @@ impl Niri {
         }
 
         let mon = self.layout.monitor_for_output(output).unwrap();
-        if mon.render_above_top_layer() {
+        if mon.render_above_top_layer() && !self.layout.is_all_outputs_expose_on_output(output) {
             return false;
         }
 
@@ -3566,12 +3568,17 @@ impl Niri {
 
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
-        if self.layout.is_expose_open() {
+        if self.layout.is_expose_open()
+            && (!self.layout.is_all_outputs_expose_open()
+                || self.layout.is_all_outputs_expose_on_output(output))
+        {
             under = under
                 .or_else(|| layer_popup_under(Layer::Top))
                 .or_else(|| layer_toplevel_under(Layer::Top))
                 .or_else(window_under);
-        } else if mon.render_above_top_layer() {
+        } else if mon.render_above_top_layer()
+            && !self.layout.is_all_outputs_expose_on_output(output)
+        {
             under = under
                 .or_else(interactive_moved_window_under)
                 .or_else(window_under)
@@ -3831,6 +3838,13 @@ impl Niri {
     pub fn queue_redraw(&mut self, output: &Output) {
         let state = self.output_state.get_mut(output).unwrap();
         state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
+        if let Some(host) = self.layout.all_outputs_expose_output() {
+            if host != output {
+                if let Some(state) = self.output_state.get_mut(host) {
+                    state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
+                }
+            }
+        }
     }
 
     pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
@@ -4524,13 +4538,16 @@ impl Niri {
 
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
-        if mon.render_above_top_layer() {
+        if mon.render_above_top_layer() && !self.layout.is_all_outputs_expose_on_output(output) {
             self.layout
                 .render_interactive_move_for_output(ctx.r(), output, &mut |elem| push(elem.into()));
 
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
-            mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            self.layout
+                .render_workspaces_for_output(ctx.r(), output, focus_ring, &mut |elem| {
+                    push(elem.into())
+                });
 
             push_popups_from_layer!(Layer::Top);
             push_normal_from_layer!(Layer::Top);
@@ -4571,7 +4588,10 @@ impl Niri {
                 push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
             }
 
-            mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            self.layout
+                .render_workspaces_for_output(ctx.r(), output, focus_ring, &mut |elem| {
+                    push(elem.into())
+                });
 
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 // The render element namespace. This will be set to the workspace index for
@@ -4886,19 +4906,23 @@ impl Niri {
             return;
         }
 
-        let current = self.layout.windows_for_output(output).any(|mapped| {
-            mapped.rules().variable_refresh_rate == Some(true) && {
-                let mut visible = false;
-                mapped.window.with_surfaces(|surface, states| {
-                    if !visible
-                        && surface_primary_scanout_output(surface, states).as_ref() == Some(output)
-                    {
-                        visible = true;
-                    }
-                });
-                visible
-            }
-        });
+        let current = self
+            .layout
+            .windows_rendered_on_output(output)
+            .any(|mapped| {
+                mapped.rules().variable_refresh_rate == Some(true) && {
+                    let mut visible = false;
+                    mapped.window.with_surfaces(|surface, states| {
+                        if !visible
+                            && surface_primary_scanout_output(surface, states).as_ref()
+                                == Some(output)
+                        {
+                            visible = true;
+                        }
+                    });
+                    visible
+                }
+            });
 
         backend.set_output_on_demand_vrr(self, output, current);
     }
@@ -4952,13 +4976,13 @@ impl Niri {
             );
         }
 
-        // We're only updating the current output's windows and layer surfaces. This should be fine
-        // as in niri they can only be rendered on a single output at a time.
+        // Include remote windows shown by all-output Exposé. Their primary output
+        // can still be their native output if more of the surface is visible there.
         //
         // The reason to do this at all is that it keeps track of whether the surface is visible or
         // not in a unified way with the pointer surfaces, which makes the logic elsewhere simpler.
 
-        for mapped in self.layout.windows_for_output(output) {
+        for mapped in self.layout.windows_rendered_on_output(output) {
             let win = &mapped.window;
             let offscreen_data = mapped.offscreen_data();
             let offscreen_data = offscreen_data.as_ref();
@@ -5221,14 +5245,17 @@ impl Niri {
 
         let frame_callback_time = get_monotonic_time();
 
-        for mapped in self.layout.windows_for_output_mut(output) {
-            mapped.send_frame(
-                output,
-                frame_callback_time,
-                FRAME_CALLBACK_THROTTLE,
-                should_send,
-            );
-        }
+        let include_all = self.layout.is_all_outputs_expose_on_output(output);
+        self.layout.with_windows_mut(|mapped, window_output| {
+            if include_all || window_output == Some(output) {
+                mapped.send_frame(
+                    output,
+                    frame_callback_time,
+                    FRAME_CALLBACK_THROTTLE,
+                    should_send,
+                );
+            }
+        });
 
         for surface in layer_map_for_output(output).layers() {
             surface.send_frame(
@@ -5376,7 +5403,7 @@ impl Niri {
             );
         }
 
-        for mapped in self.layout.windows_for_output(output) {
+        for mapped in self.layout.windows_rendered_on_output(output) {
             mapped.window.take_presentation_feedback(
                 &mut feedback,
                 surface_primary_scanout_output,

@@ -2,6 +2,10 @@ use niri_config::animations::{Curve, EasingParams, Kind};
 
 use super::*;
 
+fn center(rect: Rectangle<f64, Logical>) -> Point<f64, Logical> {
+    rect.loc + Point::from((rect.size.w / 2., rect.size.h / 2.))
+}
+
 fn setup() -> Layout<TestWindow> {
     let mut options = Options::default();
     options.animations.expose_open_close.0.kind = Kind::Easing(EasingParams {
@@ -47,6 +51,164 @@ fn targets(layout: &Layout<TestWindow>) -> Vec<(usize, Rectangle<f64, Logical>)>
         .zip(rects)
         .map(|(tile, rect)| (*tile.window().id(), rect))
         .collect()
+}
+
+fn setup_two_outputs() -> Layout<TestWindow> {
+    let mut layout = setup();
+    for op in [
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::MoveWindowToWorkspace {
+            window_id: Some(3),
+            workspace_idx: 1,
+        },
+        Op::FocusOutput(1),
+        Op::CompleteAnimations,
+    ] {
+        op.apply(&mut layout);
+    }
+    layout
+}
+
+fn all_targets(
+    layout: &Layout<TestWindow>,
+    output: &Output,
+) -> Vec<(usize, Rectangle<f64, Logical>)> {
+    let mut tiles: Vec<_> = layout
+        .workspaces()
+        .flat_map(|(_, _, ws)| ws.tiles())
+        .collect();
+    tiles.sort_by_key(|tile| tile.opening_order);
+    let sizes: Vec<_> = tiles.iter().map(|tile| tile.tile_size()).collect();
+    let rects = crate::layout::expose::arrange(
+        &sizes,
+        layout.monitor_for_output(output).unwrap().working_area,
+        16.,
+    );
+    tiles
+        .into_iter()
+        .zip(rects)
+        .map(|(tile, rect)| (*tile.window().id(), rect))
+        .collect()
+}
+
+#[test]
+fn all_outputs_expose_shows_remote_windows_without_moving_them() {
+    let mut layout = setup_two_outputs();
+    let host = layout.active_output().unwrap().clone();
+    let targets = all_targets(&layout, &host);
+    assert_eq!(
+        targets.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    layout.toggle_expose_all_outputs();
+    assert!(layout.is_all_outputs_expose_open());
+    assert!(layout.monitors().all(|mon| !mon.is_expose_open()));
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    for (id, rect) in targets {
+        let (window, hit) = layout.window_under(&host, center(rect)).unwrap();
+        assert_eq!(*window.id(), id);
+        assert!(matches!(hit, HitType::Activate { .. }));
+    }
+    assert_eq!(
+        layout
+            .windows_for_output(&host)
+            .map(|win| *win.id())
+            .collect::<Vec<_>>()
+            .len(),
+        2
+    );
+    assert_eq!(layout.windows_rendered_on_output(&host).count(), 3);
+    let remote = layout
+        .windows()
+        .find(|(_, win)| *win.id() == 3)
+        .unwrap()
+        .0
+        .unwrap()
+        .output
+        .clone();
+    assert_ne!(remote, host);
+    layout.select_expose_window(&3);
+    assert!(!layout.is_expose_open());
+    assert_eq!(*layout.focus().unwrap().id(), 3);
+    assert_eq!(layout.active_output(), Some(&remote));
+    Op::CompleteAnimations.apply(&mut layout);
+    assert!(layout.all_outputs_expose_output().is_none());
+    layout.verify_invariants();
+}
+
+#[test]
+fn all_outputs_keyboard_navigation_keeps_the_original_host() {
+    let mut layout = setup_two_outputs();
+    let host = layout.active_output().unwrap().clone();
+    layout.toggle_expose_all_outputs();
+    for expected in [3, 1, 2] {
+        layout.cycle_expose(true);
+        assert_eq!(*layout.focus().unwrap().id(), expected);
+        assert_eq!(layout.all_outputs_expose_output(), Some(&host));
+        assert!(layout.is_expose_open());
+    }
+    layout.activate_window(&3);
+    layout.confirm_expose();
+    assert_eq!(*layout.focus().unwrap().id(), 3);
+    assert!(!layout.is_expose_open());
+    layout.verify_invariants();
+}
+
+#[test]
+fn all_outputs_grid_updates_after_windows_and_outputs_change() {
+    let mut layout = setup_two_outputs();
+    let host = layout.active_output().unwrap().clone();
+    layout.toggle_expose_all_outputs();
+    Op::FocusOutput(2).apply(&mut layout);
+    Op::AddWindow {
+        params: TestWindowParams::new(4),
+    }
+    .apply(&mut layout);
+    Op::CloseWindow(3).apply(&mut layout);
+    Op::AddOutput(3).apply(&mut layout);
+    layout.update_render_elements(Some(&host));
+    assert_eq!(layout.all_outputs_expose_output(), Some(&host));
+    assert!(layout.monitors().all(|mon| !mon.is_expose_open()));
+    Op::AdvanceAnimations { msec_delta: 1000 }.apply(&mut layout);
+    for (id, rect) in all_targets(&layout, &host) {
+        assert_eq!(
+            *layout.window_under(&host, center(rect)).unwrap().0.id(),
+            id
+        );
+    }
+    Op::RemoveOutput(2).apply(&mut layout);
+    layout.update_render_elements(None);
+    assert!(layout.is_all_outputs_expose_open());
+    Op::RemoveOutput(1).apply(&mut layout);
+    assert!(!layout.is_all_outputs_expose_open());
+    layout.verify_invariants();
+}
+
+#[test]
+fn all_outputs_mode_switching_and_reopening_are_mutually_exclusive() {
+    let mut layout = setup_two_outputs();
+    layout.open_expose();
+    layout.toggle_expose_all_outputs();
+    assert!(layout.is_all_outputs_expose_open());
+    assert!(layout.monitors().all(|mon| !mon.is_expose_open()));
+    layout.toggle_expose_all_outputs();
+    assert!(!layout.is_expose_open());
+    layout.toggle_expose_all_outputs();
+    assert!(layout.is_all_outputs_expose_open());
+    layout.toggle_overview();
+    assert!(layout.is_overview_open());
+    assert!(layout.all_outputs_expose_output().is_none());
+    layout.toggle_expose_all_outputs();
+    assert!(!layout.is_overview_open());
+    layout.close_expose();
+    layout.open_expose();
+    assert!(layout.is_expose_open());
+    assert!(layout.all_outputs_expose_output().is_none());
+    layout.verify_invariants();
 }
 
 #[test]

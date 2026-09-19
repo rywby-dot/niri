@@ -1,6 +1,377 @@
 //! Exposé geometry is computed once, before starting its transition.
 
+use smithay::backend::renderer::element::utils::{
+    Relocate, RelocateRenderElement, RescaleRenderElement,
+};
+use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
+
+use super::monitor::{MonitorInnerRenderElement, MonitorRenderElement};
+use super::{Layout, LayoutElement};
+use crate::animation::Animation;
+use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::scale_override::ScaleOverrideRenderElement;
+use crate::render_helpers::xray::XrayPos;
+use crate::render_helpers::RenderCtx;
+
+#[derive(Debug)]
+pub(super) struct ExposeWindow<I> {
+    pub(super) id: I,
+    pub(super) origin: Point<f64, Logical>,
+    pub(super) target: Rectangle<f64, Logical>,
+    pub(super) size: Size<f64, Logical>,
+    pub(super) origin_scale: f64,
+}
+
+impl<I> ExposeWindow<I> {
+    pub(super) fn geometry(&self, progress: f64) -> Rectangle<f64, Logical> {
+        Rectangle::new(
+            self.origin + (self.target.loc - self.origin).upscale(progress),
+            self.size.upscale(
+                self.origin_scale
+                    + (self.target.size.w / self.size.w - self.origin_scale) * progress,
+            ),
+        )
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct AllOutputsExpose<I> {
+    pub(super) output: Output,
+    pub(super) open: bool,
+    animation: Animation,
+    windows: Vec<ExposeWindow<I>>,
+    area: Rectangle<f64, Logical>,
+    selected: usize,
+}
+
+impl<I> AllOutputsExpose<I> {
+    pub(super) fn selected_window(&self) -> Option<&I> {
+        self.windows.get(self.selected).map(|window| &window.id)
+    }
+
+    pub(super) fn window_under(&self, pos: Point<f64, Logical>) -> Option<&I> {
+        if !self.open {
+            return None;
+        }
+        let progress = self.animation.clamped_value();
+        self.windows
+            .iter()
+            .rev()
+            .find(|window| window.geometry(progress).contains(pos))
+            .map(|window| &window.id)
+    }
+}
+
+impl<W: LayoutElement> Layout<W> {
+    pub fn all_outputs_expose_output(&self) -> Option<&Output> {
+        self.all_outputs_expose
+            .as_ref()
+            .map(|expose| &expose.output)
+    }
+
+    /// Includes remote thumbnails without changing a window's output ownership.
+    pub fn windows_rendered_on_output<'a>(
+        &'a self,
+        output: &'a Output,
+    ) -> impl Iterator<Item = &'a W> + 'a {
+        let include_all = self.is_all_outputs_expose_on_output(output);
+        let remote = self
+            .monitors()
+            .filter(move |mon| include_all && mon.output != *output)
+            .flat_map(|mon| mon.workspaces.iter().flat_map(|ws| ws.windows()));
+        self.windows_for_output(output).chain(remote)
+    }
+
+    pub fn is_all_outputs_expose_open(&self) -> bool {
+        self.all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.open)
+    }
+
+    pub fn is_all_outputs_expose_on_output(&self, output: &Output) -> bool {
+        self.all_outputs_expose
+            .as_ref()
+            .is_some_and(|expose| expose.output == *output)
+    }
+
+    pub fn toggle_expose_all_outputs(&mut self) {
+        if self.is_all_outputs_expose_open() {
+            self.close_expose();
+            return;
+        }
+        if self.interactive_move.is_some() {
+            return;
+        }
+        let Some(output) = self.active_output().cloned() else {
+            return;
+        };
+        self.open_all_outputs_expose(output);
+        for mon in self.monitors_mut() {
+            mon.cancel_expose();
+        }
+        self.overview_open = false;
+        self.overview_progress = None;
+        self.set_monitors_overview_state();
+    }
+
+    /// Native coordinates relative to the host output, including offscreen workspaces.
+    fn all_outputs_expose_windows(&self, output: &Output) -> Vec<ExposeWindow<W::Id>> {
+        let mut windows: Vec<_> = self
+            .monitors()
+            .flat_map(|mon| {
+                let offset = (mon.output.current_location() - output.current_location()).to_f64();
+                let zoom = mon.overview_zoom();
+                mon.workspaces_with_render_geo_cull(false)
+                    .flat_map(move |(ws, geo)| {
+                        ws.tiles_with_render_positions().map(move |(tile, pos, _)| {
+                            let size = tile.tile_size();
+                            let native = Rectangle::new(
+                                offset + geo.loc + pos.upscale(zoom),
+                                size.upscale(zoom),
+                            );
+                            let origin = mon
+                                .expose_window_geometry(tile.window().id())
+                                .map(|rect| Rectangle::new(offset + rect.loc, rect.size))
+                                .unwrap_or(native);
+                            (
+                                tile.opening_order,
+                                ExposeWindow {
+                                    id: tile.window().id().clone(),
+                                    origin: origin.loc,
+                                    origin_scale: origin.size.w / size.w.max(1.),
+                                    target: native,
+                                    size,
+                                },
+                            )
+                        })
+                    })
+            })
+            .collect();
+        windows.sort_by_key(|(order, _)| *order);
+        windows.into_iter().map(|(_, window)| window).collect()
+    }
+
+    fn open_all_outputs_expose(&mut self, output: Output) {
+        let Some(mon) = self.monitor_for_output(&output) else {
+            return;
+        };
+        let area = mon.working_area;
+        let mut windows = self.all_outputs_expose_windows(&output);
+        let sizes: Vec<_> = windows.iter().map(|window| window.size).collect();
+        let targets = arrange(&sizes, area, 16.);
+        if let Some(previous) = &self.all_outputs_expose {
+            let offset = (previous.output.current_location() - output.current_location()).to_f64();
+            let progress = previous.animation.clamped_value();
+            for window in &mut windows {
+                if let Some(old) = previous.windows.iter().find(|old| old.id == window.id) {
+                    let rect = old.geometry(progress);
+                    window.origin = offset + rect.loc;
+                    window.origin_scale = rect.size.w / window.size.w.max(1.);
+                }
+            }
+        }
+        for (window, target) in windows.iter_mut().zip(targets) {
+            window.target = target;
+        }
+        let selected = self
+            .focus()
+            .and_then(|focused| windows.iter().position(|window| window.id == *focused.id()))
+            .unwrap_or(0);
+        self.all_outputs_expose = Some(AllOutputsExpose {
+            output,
+            open: true,
+            windows,
+            area,
+            selected,
+            animation: Animation::new(
+                self.clock.clone(),
+                0.,
+                1.,
+                0.,
+                self.options.animations.expose_open_close.0,
+            ),
+        });
+    }
+
+    pub(super) fn refresh_all_outputs_expose(&mut self) {
+        let Some(expose) = self
+            .all_outputs_expose
+            .as_ref()
+            .filter(|expose| expose.open)
+        else {
+            return;
+        };
+        let output = expose.output.clone();
+        let Some(mon) = self.monitor_for_output(&output) else {
+            self.all_outputs_expose = None;
+            return;
+        };
+        let windows = self.all_outputs_expose_windows(&output);
+        if expose.area != mon.working_area
+            || windows.len() != expose.windows.len()
+            || windows
+                .iter()
+                .zip(&expose.windows)
+                .any(|(a, b)| a.id != b.id || a.size != b.size)
+        {
+            self.open_all_outputs_expose(output);
+        }
+        self.sync_all_outputs_expose_selection();
+    }
+
+    fn sync_all_outputs_expose_selection(&mut self) {
+        let focused = self.focus().map(|window| window.id().clone());
+        if let Some(expose) = &mut self.all_outputs_expose {
+            if let Some(idx) = expose
+                .windows
+                .iter()
+                .position(|window| Some(&window.id) == focused.as_ref())
+            {
+                expose.selected = idx;
+            }
+        }
+    }
+
+    pub(super) fn cycle_all_outputs_expose(&mut self, forward: bool) {
+        self.refresh_all_outputs_expose();
+        let Some(expose) = &mut self.all_outputs_expose else {
+            return;
+        };
+        let count = expose.windows.len();
+        if count == 0 {
+            return;
+        }
+        expose.selected = if forward {
+            (expose.selected + 1) % count
+        } else {
+            (expose.selected + count - 1) % count
+        };
+        let selected = expose.selected_window().cloned();
+        if let Some(selected) = selected {
+            self.activate_window(&selected);
+        }
+    }
+
+    pub(super) fn focus_all_outputs_expose(&mut self, direction: ExposeDirection) {
+        self.refresh_all_outputs_expose();
+        let Some(expose) = &mut self.all_outputs_expose else {
+            return;
+        };
+        let targets: Vec<_> = expose.windows.iter().map(|window| window.target).collect();
+        if let Some(idx) = neighbor(&targets, expose.selected, direction) {
+            expose.selected = idx;
+            let selected = expose.windows[idx].id.clone();
+            self.activate_window(&selected);
+        }
+    }
+
+    pub(super) fn close_all_outputs_expose(&mut self) {
+        let Some(expose) = self
+            .all_outputs_expose
+            .as_ref()
+            .filter(|expose| expose.open)
+        else {
+            return;
+        };
+        let native = self.all_outputs_expose_windows(&expose.output);
+        let expose = self.all_outputs_expose.as_mut().unwrap();
+        let progress = expose.animation.clamped_value();
+        for window in &mut expose.windows {
+            let rect = window.geometry(progress);
+            window.origin = rect.loc;
+            window.origin_scale = rect.size.w / window.size.w.max(1.);
+            if let Some(native) = native.iter().find(|native| native.id == window.id) {
+                window.target = native.target;
+            }
+        }
+        expose.open = false;
+        expose.animation = Animation::new(
+            self.clock.clone(),
+            0.,
+            1.,
+            0.,
+            self.options.animations.expose_open_close.0,
+        );
+    }
+
+    pub(super) fn advance_all_outputs_expose(&mut self) {
+        let Some(expose) = &self.all_outputs_expose else {
+            return;
+        };
+        if !expose.open {
+            if expose.animation.is_done() {
+                self.all_outputs_expose = None;
+                return;
+            }
+            let native = self.all_outputs_expose_windows(&expose.output);
+            for window in &mut self.all_outputs_expose.as_mut().unwrap().windows {
+                if let Some(native) = native.iter().find(|native| native.id == window.id) {
+                    window.target = native.target;
+                }
+            }
+        }
+    }
+
+    pub(super) fn all_outputs_expose_animating(&self, output: Option<&Output>) -> bool {
+        self.all_outputs_expose.as_ref().is_some_and(|expose| {
+            output.is_none_or(|output| expose.output == *output)
+                && (!expose.animation.is_done()
+                    || self.monitors().any(|mon| mon.are_animations_ongoing()))
+        })
+    }
+
+    pub fn render_workspaces_for_output<R: NiriRenderer>(
+        &self,
+        mut ctx: RenderCtx<R>,
+        output: &Output,
+        focus_ring: bool,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        if let Some(expose) = self
+            .all_outputs_expose
+            .as_ref()
+            .filter(|expose| expose.output == *output)
+        {
+            let scale = output.current_scale().fractional_scale();
+            let progress = expose.animation.clamped_value();
+            for (idx, window) in expose.windows.iter().enumerate().rev() {
+                let Some(tile) = self
+                    .workspaces()
+                    .flat_map(|(_, _, ws)| ws.tiles())
+                    .find(|tile| *tile.window().id() == window.id)
+                else {
+                    continue;
+                };
+                let rect = window.geometry(progress);
+                let zoom = rect.size.w / tile.tile_size().w.max(1.);
+                tile.render_expose(
+                    ctx.r(),
+                    Point::default(),
+                    XrayPos::new(rect.loc, zoom),
+                    focus_ring && expose.open && idx == expose.selected,
+                    &mut |elem| {
+                        // Tile elements were prepared at the source output's physical scale.
+                        let elem = ScaleOverrideRenderElement::from_element(elem, tile.scale());
+                        let elem = MonitorInnerRenderElement::ExposeAtSourceScale(elem);
+                        let elem = RescaleRenderElement::from_element(
+                            elem,
+                            Point::default(),
+                            zoom * scale / tile.scale(),
+                        );
+                        push(RelocateRenderElement::from_element(
+                            elem,
+                            rect.loc.to_physical_precise_round(scale),
+                            Relocate::Relative,
+                        ));
+                    },
+                );
+            }
+        } else if let Some(mon) = self.monitor_for_output(output) {
+            mon.render_workspaces(ctx, focus_ring, push);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExposeDirection {

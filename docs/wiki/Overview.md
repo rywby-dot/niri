@@ -51,6 +51,18 @@ Positions are calculated before the animation starts, so visible windows move di
 
 Use `toggle-expose`, `open-expose`, or `close-expose` in binds or through `niri msg action`.
 The default configuration binds `Mod+E` to `toggle-expose`.
+Use `toggle-expose-all-outputs` to gather windows from every monitor on the focused monitor:
+
+```kdl
+binds {
+    Mod+Shift+S repeat=false { toggle-expose-all-outputs; }
+}
+```
+
+The grid stays on that monitor while navigating, without moving the actual windows.
+Choosing a remote window closes Exposé and focuses its original monitor and workspace.
+The all-output mode shares the same animation, navigation, repeat settings and decorations.
+
 Click or tap a window to close Exposé and focus it, switching to its workspace when necessary.
 Left and Right select windows within the current row on the active output.
 Up and Down select the window closest horizontally in the adjacent row.

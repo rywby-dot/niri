@@ -1,11 +1,11 @@
 use niri_config::{Action, Color, Config};
-use smithay::backend::renderer::element::Element as _;
+use smithay::backend::renderer::element::{Element as _, Id};
 use smithay::backend::renderer::Color32F;
 use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
 use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     Anchor, KeyboardInteractivity,
 };
-use smithay::utils::Point;
+use smithay::utils::{Point, Rectangle, Size};
 use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::client::{ClientId, LayerConfigureProps};
@@ -79,6 +79,103 @@ fn top_layer_launcher_receives_focus_and_pointer_input_in_expose() {
     let under = f.niri().contents_under(Point::from((50., 50.)));
     assert!(under.layer.is_some());
     assert!(under.window.is_none());
+}
+
+#[test]
+fn egl_all_outputs_expose_preserves_geometry_across_output_scales() {
+    let mut config = Config::default();
+    config.layout.border.off = true;
+    config.layout.focus_ring.off = true;
+    config.animations.expose_open_close.0.off = true;
+    let mut f = Fixture::with_config(config);
+    f.niri_state().backend.headless().add_renderer().unwrap();
+    f.add_output(1, (1280, 720));
+    f.add_output(2, (1280, 720));
+    let host = f.niri_output(1);
+    let remote = f.niri_output(2);
+    remote.change_current_state(
+        None,
+        None,
+        Some(smithay::output::Scale::Fractional(2.)),
+        Some((1280, 0).into()),
+    );
+    f.niri().layout.update_output_size(&remote);
+    let id = f.add_client();
+    create_window(&mut f, id);
+    f.niri_focus_output(2);
+    create_window(&mut f, id);
+    f.niri_focus_output(1);
+    f.niri_complete_animations();
+    f.niri().layout.toggle_expose_all_outputs();
+    f.niri_complete_animations();
+    f.niri().update_render_elements(Some(&host));
+    let mut tiles: Vec<_> = f
+        .niri()
+        .layout
+        .workspaces()
+        .flat_map(|(_, _, ws)| ws.tiles())
+        .collect();
+    tiles.sort_by_key(|tile| tile.window().id().get());
+    assert_eq!(
+        tiles.iter().map(|tile| tile.scale()).collect::<Vec<_>>(),
+        [1., 2.]
+    );
+    let sizes: Vec<_> = tiles.iter().map(|tile| tile.tile_size()).collect();
+    let ids: Vec<_> = tiles
+        .iter()
+        .map(|tile| Id::from_wayland_resource(tile.window().toplevel().wl_surface()))
+        .collect();
+    assert_eq!(sizes, [Size::from((100., 100.)), Size::from((100., 100.))]);
+    // Two square windows fill one centered row, with 16 logical pixels between them.
+    let rects: [Rectangle<f64, smithay::utils::Logical>; 2] = [
+        Rectangle::new((16., 52.).into(), Size::from((616., 616.))),
+        Rectangle::new((648., 52.).into(), Size::from((616., 616.))),
+    ];
+    let expected: Vec<_> = ids.into_iter().zip(rects).collect();
+    let state = f.niri_state();
+    let mut seen = Vec::new();
+    state
+        .backend
+        .with_primary_renderer(|renderer| {
+            state.niri.layout.render_workspaces_for_output(
+                RenderCtx {
+                    renderer,
+                    target: RenderTarget::Output,
+                    xray: None,
+                },
+                &host,
+                false,
+                &mut |elem| {
+                    if let Some((id, rect)) = expected.iter().find(|(id, _)| *id == *elem.id()) {
+                        let actual = elem.geometry(1.0.into());
+                        let planned = rect.to_i32_round::<i32>();
+                        seen.push((id.clone(), actual, planned));
+                    }
+                },
+            );
+        })
+        .unwrap();
+    assert_eq!(seen.len(), 2);
+    for (_, actual, planned) in seen {
+        assert!(
+            (actual.loc.x - planned.loc.x).abs() <= 1,
+            "{actual:?} != {planned:?}"
+        );
+        assert!(
+            (actual.loc.y - planned.loc.y).abs() <= 1,
+            "{actual:?} != {planned:?}"
+        );
+        assert!(
+            (actual.size.w - planned.size.w).abs() <= 1,
+            "{actual:?} != {planned:?}"
+        );
+        assert!(
+            (actual.size.h - planned.size.h).abs() <= 1,
+            "{actual:?} != {planned:?}"
+        );
+    }
+    assert_eq!(f.niri().layout.windows_for_output(&host).count(), 1);
+    assert_eq!(f.niri().layout.windows_for_output(&remote).count(), 1);
 }
 
 #[test]

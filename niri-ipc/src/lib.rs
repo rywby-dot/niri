@@ -916,6 +916,8 @@ pub enum Action {
     CloseOverview {},
     /// Toggle Exposé, showing all windows in a grid.
     ToggleExpose {},
+    /// Toggle Exposé with windows from every output on the focused output.
+    ToggleExposeAllOutputs {},
     /// Open Exposé.
     OpenExpose {},
     /// Close Exposé.

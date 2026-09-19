@@ -650,6 +650,7 @@ mod tests {
                 Mod+E { toggle-expose; }
                 Mod+F { open-expose; }
                 Mod+G { close-expose; }
+                Mod+Shift+S repeat=false { toggle-expose-all-outputs; }
             }
             animations {
                 overview-open-close { off; }
@@ -676,7 +677,8 @@ mod tests {
             [
                 Action::ToggleExpose,
                 Action::OpenExpose,
-                Action::CloseExpose
+                Action::CloseExpose,
+                Action::ToggleExposeAllOutputs
             ]
         );
     }

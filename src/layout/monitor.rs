@@ -10,6 +10,7 @@ use smithay::backend::renderer::element::utils::{
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+use super::expose::ExposeWindow;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::{Tile, TileRenderElement};
@@ -23,6 +24,7 @@ use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::scale_override::ScaleOverrideRenderElement;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::SolidColorRenderElement;
 use crate::render_helpers::xray::XrayPos;
@@ -62,7 +64,7 @@ pub struct Monitor<W: LayoutElement> {
     // FIXME: since this is used for things like DnD scrolling edges in the overview, ideally this
     // should only consider overlay and top layer-shell surfaces. However, Smithay doesn't easily
     // let you do this at the moment.
-    working_area: Rectangle<f64, Logical>,
+    pub(super) working_area: Rectangle<f64, Logical>,
     // Must always contain at least one.
     pub(super) workspaces: Vec<Workspace<W>>,
     /// Index of the currently active workspace.
@@ -99,27 +101,6 @@ struct Expose<I> {
     windows: Vec<ExposeWindow<I>>,
     area: Rectangle<f64, Logical>,
     selected: usize,
-}
-
-#[derive(Debug)]
-struct ExposeWindow<I> {
-    id: I,
-    origin: Point<f64, Logical>,
-    target: Rectangle<f64, Logical>,
-    size: Size<f64, Logical>,
-    origin_scale: f64,
-}
-
-impl<I> ExposeWindow<I> {
-    fn geometry(&self, progress: f64) -> Rectangle<f64, Logical> {
-        Rectangle::new(
-            self.origin + (self.target.loc - self.origin).upscale(progress),
-            self.size.upscale(
-                self.origin_scale
-                    + (self.target.size.w / self.size.w - self.origin_scale) * progress,
-            ),
-        )
-    }
 }
 
 #[derive(Debug)]
@@ -219,6 +200,7 @@ niri_render_elements! {
     MonitorInnerRenderElement<R> => {
         Workspace = CropRenderElement<WorkspaceRenderElement<R>>,
         Expose = TileRenderElement<R>,
+        ExposeAtSourceScale = ScaleOverrideRenderElement<TileRenderElement<R>>,
         InsertHint = CropRenderElement<InsertHintRenderElement>,
         UncroppedInsertHint = InsertHintRenderElement,
         Shadow = ShadowRenderElement,
@@ -1069,6 +1051,12 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub(super) fn cancel_expose(&mut self) {
         self.expose = None;
+    }
+
+    pub(super) fn expose_window_geometry(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        let expose = self.expose.as_ref()?;
+        let window = expose.windows.iter().find(|window| window.id == *id)?;
+        Some(window.geometry(expose.animation.clamped_value()))
     }
 
     pub(super) fn open_expose(&mut self) {
